@@ -85,6 +85,23 @@ class JevDecisionServiceTest {
     }
 
     @Test
+    fun `a large choice rounded per option is accepted, a real mismatch is not`() = runTest {
+        val n = 200
+        // 200 options at 0.005 sum to exactly 1; one rounded up to 0.0055 drifts the sum by 5e-4,
+        // which the old fixed 1e-6 rejected.
+        val options = (1..n).joinToString(",") { "\"o$it\":\"option $it\"" }
+        val probs = (1..n).joinToString(",") { "\"o$it\":${if (it == 1) "0.0055" else "0.005"}" }
+        val questions = testJson.parseToJsonElement("""{"pick":{"type":"choice","instructions":"pick","criteria":{$options}}}""") as JsonObject
+        val ok = """{"model":"typesafe/jev-1.13","answers":{"pick":{"type":"choice","choice":"o1","probabilities":{$probs},"confidence":0.5}},"usage":{"input_tokens":1,"output_tokens":1}}"""
+        val service = JevDecisionService(JevKeyResolver { "key" }, CapturingTransport(ok))
+        service.decide(requestAllTypes().copy(questions = questions))
+
+        val bad = ok.replace("\"o1\":0.0055", "\"o1\":0.2")
+        val strict = JevDecisionService(JevKeyResolver { "key" }, CapturingTransport(bad))
+        assertEquals("MALFORMED_RESPONSE", assertFailsWith<JevFailure> { strict.decide(requestAllTypes().copy(questions = questions)) }.code)
+    }
+
+    @Test
     fun `accepts official fractional probability weighted score`() = runTest {
         val service = JevDecisionService(JevKeyResolver { "key" }, CapturingTransport(validResponse))
         assertEquals("1.05", service.decide(requestAllTypes()).response["answers"]!!.jsonObject["readiness"]!!.jsonObject["score"]!!.jsonPrimitive.content)
