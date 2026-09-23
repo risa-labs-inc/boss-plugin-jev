@@ -1,0 +1,24 @@
+{
+  "manifestVersion": 1,
+  "pluginId": "ai.rever.boss.plugin.dynamic.jev",
+  "displayName": "Jev",
+  "version": "0.2.0",
+  "apiVersion": "1.0.87",
+  "minApiVersion": "1.0.68",
+  "minBossVersion": "9.4.2",
+  "mainClass": "ai.rever.boss.plugin.dynamic.jev.JevDynamicPlugin",
+  "type": "panel",
+  "description": "Ask a decision model structured questions from a sidebar panel or the BOSS MCP server, using the OpenRouter key already configured in BOSS.",
+  "author": "Risa Labs",
+  "url": "https://github.com/risa-labs-inc/boss-plugin-jev",
+  "requiresAdmin": false,
+  "panel": {
+    "position": "right_top_bottom",
+    "priority": 60
+  },
+  "sandbox": {
+    "maxThreads": 6,
+    "maxRestartAttempts": 3,
+    "heartbeatIntervalMs": 5000
+  }
+}

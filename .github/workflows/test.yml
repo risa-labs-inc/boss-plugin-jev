@@ -1,0 +1,47 @@
+name: Tests
+
+# build.yml releases on every push to main, and the release runs the tests only
+# after the version is bumped. This job runs them on the pull request instead.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # boss-plugin-api is compileOnly (the host provides it at runtime), but the
+      # tests run outside the host, so the jar has to be on the test classpath.
+      # Resolved as 'latest', the same way build.yml asks the release workflow.
+      - name: Fetch the boss-plugin-api jar
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p build/downloaded-deps
+          API_VERSION=$(gh api repos/risa-labs-inc/boss-plugin-api/releases/latest --jq '.tag_name' | sed 's/^v//')
+          echo "Resolved boss-plugin-api $API_VERSION"
+          curl -fsSL -o build/downloaded-deps/boss-plugin-api.jar \
+            "https://github.com/risa-labs-inc/boss-plugin-api/releases/download/v${API_VERSION}/boss-plugin-api-${API_VERSION}.jar"
+
+      - name: Run tests
+        run: ./gradlew test --no-daemon
+        env:
+          CI: 'true'
+
+      - name: Upload visual renders
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jev-visual-renders
+          path: build/reports/visual/
+          if-no-files-found: warn
