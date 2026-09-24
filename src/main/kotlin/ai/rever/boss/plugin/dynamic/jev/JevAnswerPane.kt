@@ -368,7 +368,7 @@ private fun SetupCard(viewModel: JevPlaygroundViewModel) {
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text("Connect OpenRouter to run Jev", color = JevTokens.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        Text("1. Open Settings → AI Providers and add your OpenRouter key.", color = JevTokens.TextSecondary, fontSize = 12.sp)
+        Text("1. Open Secret Manager → AI Providers and add your OpenRouter key.", color = JevTokens.TextSecondary, fontSize = 12.sp)
         Text("2. Select any OpenRouter model there. Jev uses the model picked in this panel.", color = JevTokens.TextSecondary, fontSize = 12.sp)
         BossPrimaryButton("Open AI Providers", onClick = viewModel::openSettings)
         Text("You can write questions now. Run unlocks once the key is found.", color = JevTokens.TextMuted, fontSize = 12.sp)
@@ -396,7 +396,7 @@ private fun ErrorCard(error: JevRunError, viewModel: JevPlaygroundViewModel, has
 private fun adviceFor(code: String): String = when (code) {
     "TIMEOUT" -> "Raise the timeout or trim the questions, then run again."
     "RATE_LIMITED" -> "Wait a minute, then run again."
-    "AUTH_ERROR" -> "Check the OpenRouter key in Settings → AI Providers."
+    "AUTH_ERROR" -> "Check the OpenRouter key in Secret Manager → AI Providers."
     "BUSY" -> "Wait for running calls to finish, then run again."
     "NETWORK_ERROR" -> "Check the connection, then run again."
     "INPUT_TOO_LARGE" -> "Shorten the context or remove questions."

@@ -145,7 +145,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
         if (runJob?.isActive == true) return
         val snapshot = _state.value
         if (!hasOpenRouterKey()) {
-            update { copy(pane = JevPane.ANSWER, selectedRunId = null, error = JevRunError("MISSING_OPENROUTER_KEY", "Add an OpenRouter key in Settings → AI Providers")) }
+            update { copy(pane = JevPane.ANSWER, selectedRunId = null, error = JevRunError("MISSING_OPENROUTER_KEY", "Add an OpenRouter key in Secret Manager → AI Providers")) }
             return
         }
         val request = snapshot.request ?: run {
@@ -298,7 +298,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
     }
 
     fun openSettings() {
-        if (!services.openAiProviderSettings()) notice("Open Settings → AI Providers to add an OpenRouter key")
+        if (!services.openAiProviderSettings()) notice("Open Secret Manager → AI Providers to add an OpenRouter key")
     }
 
     fun hasOpenRouterKey() = services.hasOpenRouterKey()
