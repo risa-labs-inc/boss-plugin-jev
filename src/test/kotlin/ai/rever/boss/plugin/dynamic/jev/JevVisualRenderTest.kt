@@ -72,6 +72,37 @@ class JevVisualRenderTest {
         }
     }
 
+    @Test
+    fun `renders the composer thread`() {
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+        val context = object : PluginContext {
+            override val panelRegistry = PanelRegistry()
+            override val tabRegistry = TabRegistry()
+            override val pluginScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        }
+        val chat = ScriptedChat(
+            composeReply(context = """{"customer":"<customer name>","issue":"<what is broken>","plan":"enterprise"}""", reply = "Drafted routing and paging. Fill in the customer and issue."),
+            composeReply(context = null, reply = "Made paging stricter: it now needs a full outage with no workaround."),
+        )
+        val services = JevPluginServices(context, CapturingTransport(routingResponse), JevKeyResolver { "test-key" }, chat)
+        val viewModel = services.playground
+        try {
+            runBlocking {
+                viewModel.compose("Route support tickets to a team and decide whether to page on-call")
+                viewModel.compose("Only page for a full outage")
+            }
+            viewModel.setComposeInput("add a question about cost")
+            render(viewModel, 360, 1100, "compose-360")
+            render(viewModel, 900, 1000, "compose-two-pane-900")
+            chat.failure = JevFailure(JevComposer.NO_MODEL, "Add a chat provider in Secret Manager → AI Providers")
+            runCatching { runBlocking { viewModel.compose("again") } }
+            render(viewModel, 360, 700, "compose-error-360")
+        } finally {
+            services.dispose()
+            Dispatchers.resetMain()
+        }
+    }
+
     private fun render(viewModel: JevPlaygroundViewModel, width: Int, height: Int, name: String) {
         val output = Path.of("build/reports/visual/jev-$name.png")
         val scene = ImageComposeScene(width = width, height = height, density = Density(1f)) {

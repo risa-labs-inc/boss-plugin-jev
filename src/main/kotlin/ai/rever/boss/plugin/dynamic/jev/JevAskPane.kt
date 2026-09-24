@@ -52,6 +52,7 @@ internal fun AskPane(state: JevPlaygroundState, viewModel: JevPlaygroundViewMode
                 Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 12.dp),
             ) {
                 Column(Modifier.widthIn(max = PaneMaxWidth), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                    ComposeSection(viewModel)
                     ContextSection(state, viewModel)
                     QuestionsSection(state, viewModel, compact)
                 }
