@@ -152,6 +152,7 @@ sealed interface JevField {
     data object Questions : JevField
     data object Timeout : JevField
     data object Model : JevField
+    data class Placeholder(val key: String) : JevField
     data class Question(val index: Int) : JevField
     data class QuestionId(val index: Int) : JevField
     data class Instructions(val index: Int) : JevField

@@ -78,7 +78,10 @@ internal fun AnswerPane(state: JevPlaygroundState, runs: List<JevRunRecord>, vie
                             if (error.code == "MISSING_OPENROUTER_KEY") SetupCard(viewModel) else ErrorCard(error, viewModel, hasRuns = runs.isNotEmpty())
                         displayed != null -> RunView(displayed, runs, state, viewModel, compact)
                         !hasKey -> SetupCard(viewModel)
-                        else -> Starters(viewModel)
+                        else -> Text(
+                            "No answers yet. Run the draft and the full answer shows here: the verdict, every probability, and the change since the last run.",
+                            color = JevTokens.TextSecondary, fontSize = 12.sp, lineHeight = 17.sp,
+                        )
                     }
                 }
             }
@@ -401,24 +404,6 @@ private fun adviceFor(code: String): String = when (code) {
     "NETWORK_ERROR" -> "Check the connection, then run again."
     "INPUT_TOO_LARGE" -> "Shorten the context or remove questions."
     else -> "Jev never retries on its own, so run again when ready."
-}
-
-@Composable
-private fun Starters(viewModel: JevPlaygroundViewModel) {
-    Text(
-        "Answers show here, next to the questions that produced them. Start from an example, or write your own under Ask.",
-        color = JevTokens.TextSecondary, fontSize = 12.sp,
-    )
-    JevStarter.entries.forEach { starter ->
-        Column(
-            Modifier.fillMaxWidth().clip(JevTokens.Shape).background(JevTokens.Panel).border(1.dp, JevTokens.Border, JevTokens.Shape)
-                .clickable { viewModel.useStarter(starter) }.pointerHoverIcon(PointerIcon.Hand).padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            Text(starter.label, color = JevTokens.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            Text(starter.blurb, color = JevTokens.TextSecondary, fontSize = 12.sp)
-        }
-    }
 }
 
 internal data class Delta(val text: String, val tone: ChipTone)

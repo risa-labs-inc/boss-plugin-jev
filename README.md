@@ -3,20 +3,22 @@
 Jev is a dynamic BOSS plugin with two surfaces backed by one validation and execution service:
 
 - a native Compose **sidebar panel** (right sidebar, below the top group);
-- MCP tools on BOSS's existing MCP server: `jev_decide`, `jev_validate`, and `jev_presets`.
+- MCP tools on BOSS's existing MCP server: `jev_decide`, `jev_validate`, and `jev_presets`, plus `jev_draft_*`, `jev_preset_save`, and `jev_compose` for the live panel draft.
 
-Calls go to OpenRouter's SystemOne endpoint with the model chosen from `JevModelCatalog`. Today the catalog holds one model, `typesafe/jev-1.13`. Local and other decision models are meant to join it once the service can route to their backends. The plugin resolves the user's `OPENROUTER` credential lazily from **Secret Manager → AI Providers** for each run. BOSS exposes that connection only after the user also selects any OpenRouter model there. The plugin does not use the active chat model, the AI chat gateway, a configurable endpoint, or any secret file.
+Calls go to OpenRouter's SystemOne endpoint with the model chosen from `JevModelCatalog`. Today the catalog holds one model, `typesafe/jev-1.13`. Local and other decision models are meant to join it once the service can route to their backends. The plugin resolves the user's `OPENROUTER` credential lazily from **Secret Manager → AI Providers** for each run. BOSS exposes that connection only after the user also selects any OpenRouter model there. Decisions never use the active chat model, the AI chat gateway, a configurable endpoint, or any secret file. Only the Describe composer uses a chat model, through the AI Gateway.
 
 ## Panel
 
-The panel has two parts: **Ask** holds the context and questions, and **Answer** shows the results.
+The panel is conversation-first. **Chat** is where you describe the decision and see what changed. **Draft** is the full editor for context and questions. **Answer** shows the full result of a run.
 
-- **At every width:** below 640dp the two parts are tabs. At 640dp and wider they sit side by side. Below 380dp rows stack and labels shorten. On very wide windows the content is capped at a readable width.
+- **At every width:** below 640dp, Chat, Draft and Answer are tabs. At 640dp and wider, Chat is on the left, and the Draft or the latest answer is on the right. Below 380dp, rows stack and labels shorten.
 - **Header:** the preset title opens saved presets, starters, New blank, and Save as. A dot marks unsaved changes, and ⌘S saves. The model chip on the right shows which model will answer and whether the OpenRouter key is found. It also links to AI Providers.
+- **Chat:** an empty panel asks "What do you want to decide?" and offers three example prompts and the templates. Each message goes to a chat model from the AI Gateway, which writes or revises the draft. Each turn shows a one-line reply and the exact changes, computed locally (`+ cost (Score)`, `~ route: options +billing −support`, `− urgent`, `context: 2 fields added`). It also offers up to three suggested follow-ups, and the latest turn has Undo. While drafting, a card shows the model, the stage ("Drafting", then "Fixing 2 issues" during the single repair call), the elapsed seconds and Cancel. Each model call stops at 60 s, and a failure shows Retry. Manual and MCP edits add one "edited the draft" line. A run adds a compact answer card with "Open full answer", and the next turn gets a summary of that run. The composer and Run are pinned at the bottom: Enter sends, Shift+Enter adds a line, ⌘↵ runs. The drafting model is chosen under the composer, remembered, and never defaults to `openrouter/free`.
+- **Placeholders:** `<customer name>` style values in the context are listed in a "Fill before running" form. Run reads "Fill 2 fields" and stays disabled until they are filled. Over MCP they appear as issues at their `state.` paths.
 - **Context:** the format is detected from the text (JSON object, JSON array, or plain text). Text that looks like JSON but doesn't parse offers "Send as text".
 - **Questions:** typed cards for Yes/No (`noul`), Choice, and Score. Switching type keeps what was typed. A Form/JSON toggle syncs both ways. JSON that the form can't show faithfully, such as structured instructions, stays in JSON.
 - **Validation:** runs on every edit. Each issue appears under the field that caused it. The Run bar counts the issues, and clicking the count scrolls to the first one.
-- **Run bar:** Run (⌘↵), a timeout picker, and Copy as `jev_decide` arguments. Without a key, Run becomes "Connect OpenRouter".
+- **Run bar:** Run (⌘↵) and a timeout picker, pinned under the composer. Copy as `jev_decide` arguments is in the Draft header, next to the question chips and the validation status. Without a key, Run becomes "Connect OpenRouter".
 - **Answers:** each card leads with the verdict, then shows the probabilities. Only the winning bar uses the accent color. A chip shows the change since the previous run from the same source, and a flipped verdict is amber.
 - **Run history:** a strip of the last 20 runs from the panel and from MCP, with MCP runs tagged. An MCP run can be loaded into the editor. A panel run whose inputs have been edited since offers Restore.
 
@@ -36,6 +38,16 @@ It returns JSON text containing `response` and `latency_ms`. Failures return `is
 `jev_validate` takes the same arguments, runs only the local checks, and returns `valid` plus every issue with its path. It never calls OpenRouter and is read-only.
 
 `jev_presets` lists saved presets with their questions, model, and timeout. It never returns saved context text.
+
+These tools act on the draft open in the panel, and each change shows there immediately. They work while the panel is closed.
+
+- `jev_draft_get` (read-only) returns the context (`state`), questions, model, timeout, every issue with its path, and a summary of the last run.
+- `jev_draft_set` sets any of `state`, `questions`, `model`, and `timeout_ms`. `mode: "replace"` (the default) swaps the questions. `mode: "merge"` upserts them by ID, and `remove_questions` deletes IDs. It validates and never runs.
+- `jev_draft_run` runs the draft exactly as the Run button does, so the answer appears in the Answer pane and the history. It is a paid call.
+- `jev_preset_save` saves the draft, or only the given `questions` with no context, as a named preset.
+- `jev_compose` runs the Describe composer with a `message` and returns the new draft.
+
+A typical agent loop is `jev_draft_set`, then fix the issues it reports, then `jev_draft_run`, then refine.
 
 ## Local safety limits
 

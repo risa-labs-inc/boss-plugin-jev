@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.jev
 
+import ai.rever.boss.plugin.api.AiGatewayAPI
 import ai.rever.boss.plugin.api.CustomPluginEvent
 import ai.rever.boss.plugin.api.PanelId
 import ai.rever.boss.plugin.api.PluginContext
@@ -10,6 +11,10 @@ class JevPluginServices(
     transport: JevTransport = JdkJevTransport(),
     /** Test seam; production resolves the key from Secret Manager → AI Providers. */
     private val keyResolverOverride: JevKeyResolver? = null,
+    /** Test seam; production reaches chat models through the AI Gateway. */
+    chatOverride: JevChatClient? = null,
+    /** Test seam; production uses the host's plugin storage. */
+    storageOverride: JevPresetBackend? = null,
 ) {
     private val keyResolver = keyResolverOverride ?: JevKeyResolver {
         runCatching {
@@ -22,12 +27,18 @@ class JevPluginServices(
         }.getOrNull()
     }
     val service = JevDecisionService(keyResolver = keyResolver, transport = transport)
-    val presets: JevPresetRepository? = runCatching {
+    /** Plugin key-value storage: presets and the remembered compose model. */
+    internal val storage: JevPresetBackend? = storageOverride ?: runCatching {
         context.pluginStorageFactory
             ?.createStorage(JevDynamicPlugin.PLUGIN_ID)
             ?.let(::PluginPresetBackend)
-            ?.let(::JevPresetRepository)
     }.getOrNull()
+    val presets: JevPresetRepository? = storage?.let(::JevPresetRepository)
+    val chat: JevChatClient = chatOverride ?: GatewayJevChatClient(
+        gateway = { context.optionalHostValue { getPluginAPI(AiGatewayAPI::class.java) } },
+        llmProvider = { context.optionalHostValue { llmProvider } },
+    )
+    val composer = JevComposer(chat, service.limits)
 
     private val playgroundDelegate = lazy { JevPlaygroundViewModel(this) }
 
