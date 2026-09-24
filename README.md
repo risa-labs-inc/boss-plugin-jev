@@ -5,7 +5,7 @@ Jev is a dynamic BOSS plugin with two surfaces backed by one validation and exec
 - a native Compose **sidebar panel** (right sidebar, below the top group);
 - MCP tools on BOSS's existing MCP server: `jev_decide`, `jev_validate`, and `jev_presets`.
 
-Calls go to OpenRouter's SystemOne endpoint with the model chosen from `JevModelCatalog`. Today the catalog holds one model, `typesafe/jev-1.13`. Local and other decision models are meant to join it once the service can route to their backends. The plugin resolves the user's `OPENROUTER` credential lazily from **Settings → AI Providers** for each run. BOSS exposes that connection only after the user also selects any OpenRouter model there. The plugin does not use the active chat model, the AI chat gateway, a configurable endpoint, or any secret file.
+Calls go to OpenRouter's SystemOne endpoint with the model chosen from `JevModelCatalog`. Today the catalog holds one model, `typesafe/jev-1.13`. Local and other decision models are meant to join it once the service can route to their backends. The plugin resolves the user's `OPENROUTER` credential lazily from **Secret Manager → AI Providers** for each run. BOSS exposes that connection only after the user also selects any OpenRouter model there. The plugin does not use the active chat model, the AI chat gateway, a configurable endpoint, or any secret file.
 
 ## Panel
 

@@ -237,12 +237,12 @@ private fun ModelPicker(state: JevPlaygroundState, viewModel: JevPlaygroundViewM
                 }
                 MenuDivider()
                 Text(
-                    if (hasKey) "OpenRouter key found in AI Providers." else "No OpenRouter key yet. Add one and select any OpenRouter model there.",
+                    if (hasKey) "OpenRouter key found in Secret Manager → AI Providers." else "No OpenRouter key yet. Add one and select any OpenRouter model there.",
                     color = if (hasKey) JevTokens.TextMuted else JevTokens.Warning,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                 )
-                MenuItem("Open AI Providers settings", onClick = { open = false; viewModel.openSettings() })
+                MenuItem("Open AI Providers in Secret Manager", onClick = { open = false; viewModel.openSettings() })
             }
         }
     }
