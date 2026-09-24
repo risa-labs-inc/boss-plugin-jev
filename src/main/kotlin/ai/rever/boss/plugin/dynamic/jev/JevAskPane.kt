@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Icon
@@ -43,23 +44,58 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 
+/** The power-user editor: context and questions, as a form or JSON. Run lives in the dock. */
 @Composable
-internal fun AskPane(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel, hasKey: Boolean) {
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+internal fun DraftPane(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel) {
+    BoxWithConstraints(Modifier.fillMaxSize().background(JevTokens.Content)) {
         val compact = maxWidth < CompactWidth
         Column(Modifier.fillMaxSize()) {
+            DraftSummary(state, viewModel)
+            Box(Modifier.fillMaxWidth().height(1.dp).background(JevTokens.Border))
             Column(
                 Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 12.dp),
             ) {
                 Column(Modifier.widthIn(max = PaneMaxWidth), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-                    ComposeSection(viewModel)
+                    if (state.placeholders.isNotEmpty()) FillCard(state, viewModel)
                     ContextSection(state, viewModel)
                     QuestionsSection(state, viewModel, compact)
                 }
             }
-            Box(Modifier.fillMaxWidth().height(1.dp).background(JevTokens.Border))
-            RunBar(state, viewModel, hasKey, compact)
         }
+    }
+}
+
+/** One line that says what the draft holds and whether it can run. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DraftSummary(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel) {
+    val questions = state.questionsJson()
+    Row(
+        Modifier.fillMaxWidth().background(JevTokens.Panel).padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            val fill = state.placeholders.size
+            val other = state.issues.size - fill
+            when {
+                fill > 0 -> JevChip(if (fill == 1) "1 field to fill" else "$fill fields to fill", ChipTone.WARNING)
+                other == 0 -> JevChip("Ready to run", ChipTone.SUCCESS)
+                else -> Unit
+            }
+            if (other > 0) JevChip(if (other == 1) "1 issue" else "$other issues", ChipTone.ERROR)
+            questions?.forEach { (id, q) ->
+                val type = JevQuestionType.fromWire(((q as? kotlinx.serialization.json.JsonObject)?.get("type") as? kotlinx.serialization.json.JsonPrimitive)?.content)
+                Row(
+                    Modifier.clip(RoundedCornerShape(4.dp)).border(1.dp, JevTokens.Border, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 1.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(id, color = JevTokens.Text, fontSize = 11.sp, fontFamily = JevTokens.Mono, maxLines = 1)
+                    Text(type?.label ?: "?", color = JevTokens.TextMuted, fontSize = 11.sp, maxLines = 1)
+                }
+            }
+        }
+        JevIconButton(Icons.Outlined.ContentCopy, "Copy as jev_decide arguments", onClick = viewModel::copyMcpArguments, enabled = state.request != null)
     }
 }
 
@@ -304,7 +340,7 @@ private fun AddQuestionRow(viewModel: JevPlaygroundViewModel, enabled: Boolean) 
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun RunBar(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel, hasKey: Boolean, compact: Boolean) {
+internal fun RunBar(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel, hasKey: Boolean, compact: Boolean) {
     val anchors = LocalIssueAnchors.current
     val scope = rememberCoroutineScope()
     FlowRow(
@@ -315,6 +351,10 @@ private fun RunBar(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel,
         val center = Modifier.align(Alignment.CenterVertically)
         when {
             !hasKey -> BossPrimaryButton("Connect OpenRouter", onClick = viewModel::openSettings, modifier = center.height(32.dp))
+            state.placeholders.isNotEmpty() -> BossPrimaryButton(
+                state.placeholders.size.let { if (it == 1) "Fill 1 field" else "Fill $it fields" },
+                onClick = {}, modifier = center.height(32.dp), enabled = false,
+            )
             state.running -> BossSecondaryButton("Cancel", onClick = viewModel::cancelRun, modifier = center.height(32.dp))
             else -> BossPrimaryButton(
                 if (compact) "Run" else "Run  ⌘↵",
@@ -325,21 +365,18 @@ private fun RunBar(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel,
             )
         }
         Box(center) { TimeoutPicker(state, viewModel) }
-        Box(center) {
-            JevIconButton(Icons.Outlined.ContentCopy, "Copy as jev_decide arguments", onClick = viewModel::copyMcpArguments, enabled = state.request != null)
-        }
-        val n = state.issues.size
+        val n = state.issues.size - state.placeholders.size
         if (n > 0) {
             JevLink(
                 if (n == 1) "1 issue" else "$n issues",
                 onClick = {
-                    viewModel.setPane(JevPane.ASK)
+                    viewModel.setPane(JevPane.DRAFT)
                     scope.launch { anchors.reveal(state.issues.first().field) }
                 },
                 modifier = center,
                 color = JevTokens.Error,
             )
-        } else if (!compact) {
+        } else if (!compact && state.placeholders.isEmpty()) {
             Text("Ready", color = JevTokens.TextMuted, fontSize = 12.sp, modifier = center)
         }
     }

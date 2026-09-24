@@ -60,7 +60,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
-/** Below this width the panes become Ask / Answer tabs. */
+/** Below this width Chat, Draft and Answer become tabs. */
 internal val TwoPaneMinWidth: Dp = 640.dp
 
 /** Below this width headers shorten and rows stack. */
@@ -73,6 +73,7 @@ internal val PaneMaxWidth: Dp = 760.dp
 fun JevPlaygroundScreen(viewModel: JevPlaygroundViewModel) {
     val state by viewModel.state.collectAsState()
     val runs by viewModel.runs.collectAsState()
+    val compose by viewModel.compose.collectAsState()
     val hasKey = viewModel.hasOpenRouterKey()
     var saveDialog by remember { mutableStateOf(false) }
     val anchors = remember { JevIssueAnchors() }
@@ -94,16 +95,26 @@ fun JevPlaygroundScreen(viewModel: JevPlaygroundViewModel) {
             Column(Modifier.fillMaxSize()) {
                 Header(state, viewModel, hasKey, compact, onSaveAs = { saveDialog = true })
                 if (twoPane) {
+                    // Conversation on the left; the Draft editor or the latest answer on the right.
                     Row(Modifier.fillMaxSize()) {
-                        Box(Modifier.weight(1f).fillMaxHeight()) { AskPane(state, viewModel, hasKey) }
+                        Box(Modifier.weight(1f).fillMaxHeight()) { ChatPane(state, viewModel, hasKey) }
                         Box(Modifier.width(1.dp).fillMaxHeight().background(JevTokens.Border))
-                        Box(Modifier.weight(1f).fillMaxHeight()) { AnswerPane(state, runs, viewModel, hasKey) }
+                        Column(Modifier.weight(1f).fillMaxHeight()) {
+                            PaneTabs(state, viewModel, listOf(JevPane.DRAFT, JevPane.ANSWER), selected = state.side)
+                            Box(Modifier.fillMaxSize()) {
+                                if (state.side == JevPane.ANSWER) AnswerPane(state, runs, viewModel, hasKey) else DraftPane(state, viewModel)
+                            }
+                        }
                     }
                 } else {
-                    PaneTabs(state, viewModel)
+                    PaneTabs(state, viewModel, JevPane.entries, selected = state.pane)
                     Box(Modifier.fillMaxSize()) {
                         when (state.pane) {
-                            JevPane.ASK -> AskPane(state, viewModel, hasKey)
+                            JevPane.CHAT -> ChatPane(state, viewModel, hasKey)
+                            JevPane.DRAFT -> Column(Modifier.fillMaxSize()) {
+                                Box(Modifier.weight(1f)) { DraftPane(state, viewModel) }
+                                Dock(state, compose, viewModel, hasKey, compact, showComposer = false)
+                            }
                             JevPane.ANSWER -> AnswerPane(state, runs, viewModel, hasKey)
                         }
                     }
@@ -249,10 +260,11 @@ private fun ModelPicker(state: JevPlaygroundState, viewModel: JevPlaygroundViewM
 }
 
 @Composable
-private fun PaneTabs(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel) {
-    Row(Modifier.fillMaxWidth().height(34.dp)) {
-        listOf(JevPane.ASK to "Ask", JevPane.ANSWER to "Answer").forEach { (pane, label) ->
-            val on = state.pane == pane
+private fun PaneTabs(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel, panes: List<JevPane>, selected: JevPane) {
+    Row(Modifier.fillMaxWidth().height(34.dp).background(JevTokens.Panel)) {
+        panes.forEach { pane ->
+            val label = when (pane) { JevPane.CHAT -> "Chat"; JevPane.DRAFT -> "Draft"; JevPane.ANSWER -> "Answer" }
+            val on = selected == pane
             Box(
                 Modifier.weight(1f).fillMaxHeight().clickable { viewModel.setPane(pane) }.pointerHoverIcon(PointerIcon.Hand),
                 contentAlignment = Alignment.Center,
@@ -261,7 +273,9 @@ private fun PaneTabs(state: JevPlaygroundState, viewModel: JevPlaygroundViewMode
                     Text(label, color = if (on) JevTokens.Text else JevTokens.TextSecondary, fontSize = 13.sp,
                         fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
                     if (pane == JevPane.ANSWER && state.unseenRun && !on) Box(Modifier.size(7.dp).clip(CircleShape).background(JevTokens.Accent))
-                    if (pane == JevPane.ASK && state.issues.isNotEmpty() && !on) JevChip("${state.issues.size}", ChipTone.ERROR)
+                    if (pane == JevPane.DRAFT && state.issues.isNotEmpty() && !on) {
+                        JevChip("${state.issues.size}", if (state.issues.size == state.placeholders.size) ChipTone.WARNING else ChipTone.ERROR)
+                    }
                 }
                 if (on) BossTabIndicator(Modifier.align(Alignment.BottomCenter).fillMaxWidth(0.6f))
             }

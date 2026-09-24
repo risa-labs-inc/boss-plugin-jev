@@ -81,10 +81,9 @@ class JevComposerTest {
     }
 
     @Test
-    fun `rejects prose, unknown keys, and wrong shapes`() {
+    fun `rejects prose and wrong shapes`() {
         val cases = listOf(
             "Sure! Here is the draft: " + composeReply(),
-            """{"context":"x","questions":{},"reply":"ok","notes":"extra"}""",
             """{"context":"x","questions":[],"reply":"ok"}""",
             """{"context":3,"questions":null,"reply":"ok"}""",
             """{"context":"x","questions":null}""",
@@ -95,7 +94,38 @@ class JevComposerTest {
         cases.forEach { raw -> assertFailsWith<IllegalArgumentException>(raw) { JevComposer.parseReply(raw) } }
     }
 
+    @Test
+    fun `suggestions parse leniently and extra keys are ignored`() {
+        val r = JevComposer.parseReply("""{"context":null,"questions":null,"reply":"ok","notes":"x","suggestions":["Add cost", 3, "", "Add cost", "Make urgency a score", "Drop support", "Fourth"]}""")
+        assertEquals(listOf("Add cost", "Make urgency a score", "Drop support"), r.suggestions)
+        assertEquals(emptyList(), JevComposer.parseReply("""{"reply":"ok","suggestions":"not a list"}""").suggestions)
+        assertEquals(emptyList(), JevComposer.parseReply("""{"reply":"ok"}""").suggestions)
+    }
+
     // ---- compose ----
+
+    @Test
+    fun `each model call is bounded at 60 seconds whatever the gateway does`() = runTest {
+        val hanging = object : JevChatClient {
+            override fun gatewayAvailable() = true
+            override fun models() = emptyList<JevChatModel>()
+            override fun defaultModel(models: List<JevChatModel>) = null
+            override suspend fun complete(system: String, messages: List<JevChatMessage>, model: JevChatModel?): String = kotlinx.coroutines.awaitCancellation()
+        }
+        val started = testScheduler.currentTime
+        val failure = assertFailsWith<JevFailure> { JevComposer(hanging).compose("x", draft) }
+        assertEquals(JevComposer.TIMEOUT, failure.code)
+        assertEquals(60_000, testScheduler.currentTime - started)
+        assertTrue("60 s" in failure.message)
+    }
+
+    @Test
+    fun `stages report drafting then fixing`() = runTest {
+        val broken = """{"sev":{"type":"score","instructions":"Rate","criteria":["only one"]}}"""
+        val stages = mutableListOf<JevComposeStage>()
+        JevComposer(ScriptedChat(composeReply(questions = broken), composeReply())).compose("x", draft, onStage = { stages += it })
+        assertEquals(listOf(JevComposeStage.Drafting, JevComposeStage.Fixing(1)), stages)
+    }
 
     @Test
     fun `a valid first reply needs no repair and the prompt carries the draft and request`() = runTest {
@@ -107,7 +137,7 @@ class JevComposerTest {
         val (system, messages) = chat.calls.single()
         val prompt = messages.single().text
         assertTrue("old context" in prompt && "\"old\"" in prompt && prompt.endsWith("route tickets"))
-        listOf("noul", "choice", "score", "snake_case", "At most 32", "2 to 10", "only one JSON object").forEach {
+        listOf("noul", "choice", "score", "snake_case", "At most 32", "2 to 10", "only one JSON object", "suggestions", "Never invent a value").forEach {
             assertTrue(it in system, "system prompt should teach: $it")
         }
     }

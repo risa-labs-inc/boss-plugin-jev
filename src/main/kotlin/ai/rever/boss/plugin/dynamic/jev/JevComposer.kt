@@ -5,6 +5,7 @@ import ai.rever.boss.plugin.api.AiMessage
 import ai.rever.boss.plugin.api.AiRequest
 import ai.rever.boss.plugin.api.LlmProvider
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -111,7 +112,7 @@ class GatewayJevChatClient(
             messages = messages.map { AiMessage(it.role, it.text) },
             // Room for reasoning models and a full 32-question draft.
             maxTokens = 8_000,
-            timeoutMs = 120_000,
+            timeoutMs = JevComposer.CALL_TIMEOUT_MS,
             extras = extras,
         )
         return api.complete(request).getOrElse { error ->
@@ -154,12 +155,23 @@ data class JevComposeResult(
     val reply: String,
     val issues: List<JevIssue> = emptyList(),
     val repaired: Boolean = false,
+    /** Up to three short next edits the user can send with one click. */
+    val suggestions: List<String> = emptyList(),
 )
+
+/** Where a compose turn is, for the in-progress card. */
+sealed interface JevComposeStage {
+    data object Drafting : JevComposeStage
+    data class Fixing(val issues: Int) : JevComposeStage
+    data object Reformatting : JevComposeStage
+}
 
 /** Turns plain language into a Jev request: one generation, at most one repair turn. */
 class JevComposer(
     private val chat: JevChatClient,
     private val limits: JevLimits = JevLimits(),
+    /** Bounds each model call here, whatever the gateway's own limits and retries do. */
+    private val callTimeoutMs: Long = CALL_TIMEOUT_MS,
 ) {
     suspend fun compose(
         message: String,
@@ -167,10 +179,12 @@ class JevComposer(
         turns: List<JevComposeTurn> = emptyList(),
         lastRun: String? = null,
         model: JevChatModel? = null,
+        onStage: (JevComposeStage) -> Unit = {},
     ): JevComposeResult {
         require(message.isNotBlank()) { "Describe what to decide" }
         val prompt = JevChatMessage.user(userPrompt(message, draft, turns, lastRun))
-        val firstRaw = chat.complete(SYSTEM_PROMPT, listOf(prompt), model)
+        onStage(JevComposeStage.Drafting)
+        val firstRaw = call(listOf(prompt), model)
         val first = runCatching { parseReply(firstRaw) }
         val firstIssues = first.getOrNull()?.let { issuesFor(it, draft) }
         if (firstIssues != null && firstIssues.isEmpty()) return first.getOrThrow()
@@ -182,11 +196,8 @@ class JevComposer(
         } else {
             "That reply was not usable: ${first.exceptionOrNull()?.message}. Reply with only the JSON object described, nothing else."
         }
-        val repairRaw = chat.complete(
-            SYSTEM_PROMPT,
-            listOf(prompt, JevChatMessage.assistant(firstRaw.take(MAX_ECHO_CHARS)), JevChatMessage.user(feedback)),
-            model,
-        )
+        onStage(if (firstIssues != null) JevComposeStage.Fixing(firstIssues.size) else JevComposeStage.Reformatting)
+        val repairRaw = call(listOf(prompt, JevChatMessage.assistant(firstRaw.take(MAX_ECHO_CHARS)), JevChatMessage.user(feedback)), model)
         val repair = runCatching { parseReply(repairRaw) }.getOrNull()
         val base = first.getOrNull()
         val merged = when {
@@ -197,10 +208,17 @@ class JevComposer(
             repair == null -> base!!
             base == null -> repair
             // A field the repair left null keeps the first reply's value, not the original draft's.
-            else -> JevComposeResult(repair.context ?: base.context, repair.questions ?: base.questions, repair.reply)
+            else -> JevComposeResult(
+                repair.context ?: base.context, repair.questions ?: base.questions, repair.reply,
+                suggestions = repair.suggestions.ifEmpty { base.suggestions },
+            )
         }
         return merged.copy(issues = issuesFor(merged, draft), repaired = true)
     }
+
+    private suspend fun call(messages: List<JevChatMessage>, model: JevChatModel?): String =
+        withTimeoutOrNull(callTimeoutMs) { chat.complete(SYSTEM_PROMPT, messages, model) }
+            ?: throw JevFailure(TIMEOUT, "${model?.label ?: "The chat model"} did not answer within ${callTimeoutMs / 1000} s. Try again, or pick a faster model.")
 
     /** Validates the draft that would result, with the panel's model and timeout. */
     internal fun issuesFor(result: JevComposeResult, draft: JevComposeDraft): List<JevIssue> {
@@ -228,6 +246,10 @@ class JevComposer(
         const val NO_MODEL = "NO_MODEL"
         const val MODEL_UNROUTABLE = "MODEL_UNROUTABLE"
         const val COMPOSE_FAILED = "COMPOSE_FAILED"
+        const val TIMEOUT = "COMPOSE_TIMEOUT"
+        const val CALL_TIMEOUT_MS = 60_000L
+        private const val MAX_SUGGESTIONS = 3
+        private const val MAX_SUGGESTION_CHARS = 80
 
         private val SNAKE_CASE = Regex("[a-z][a-z0-9_]*")
         private const val MAX_FEEDBACK_ISSUES = 20
@@ -240,10 +262,11 @@ class JevComposer(
 You write requests for Jev, a decision model. Jev judges a situation (the context) against typed questions and returns calibrated probabilities. You never answer the questions yourself; you write them.
 
 Reply with only one JSON object, with no prose and no code fence:
-{"context": <string, object, array, or null>, "questions": <object or null>, "reply": "<one or two plain sentences>"}
+{"context": <string, object, array, or null>, "questions": <object or null>, "reply": "<one short sentence>", "suggestions": ["<short next edit>", ...]}
 - context: the situation Jev judges. Use a JSON object when the facts are fields and values, otherwise plain text. null keeps the current context.
 - questions: the COMPLETE questions object, not a diff. null keeps the current questions.
-- reply: what you changed and what the user should fill in. Plain sentences, no markdown.
+- reply: one short plain sentence on what you did. The user sees the exact changes separately, so do not list them.
+- suggestions: 0 to 3 short next edits the user might want, written as the user would ask, under 60 characters each, such as "Add a question about cost".
 
 The questions object is keyed by question id. Ids are snake_case (lowercase letters, digits and underscores, starting with a letter), unique and short, such as "route" or "page_oncall". At most ${JevLimits().maxQuestions} questions, at least 1.
 Each question is an object with exactly the fields "type", "instructions" and "criteria". No other fields.
@@ -265,7 +288,8 @@ Example:
 
 Guidance:
 - One decision per question. Use choice for mutually exclusive options, score for degrees, noul for a single yes/no.
-- Facts belong in the context, not the instructions. When the user gave no facts, write a short example context with clearly marked placeholders such as "<customer name>", and say so in reply.
+- Facts belong in the context, not the instructions. Put every fact the user gave into the context as a real value.
+- Use a placeholder such as "<customer name>" only for a fact the decision needs that the user did not give. Never invent a value. Keep placeholders few; the user must fill each one before running.
 - On a revision, keep every question, id and context detail the user did not ask to change.
 - When a last run is given, use it to explain the result or tighten criteria. Do not invent results.
         """.trimIndent()
@@ -311,8 +335,7 @@ Guidance:
             val root = runCatching { Json.parseToJsonElement(body) }.getOrElse {
                 throw IllegalArgumentException("the JSON does not parse (${it.message?.lineSequence()?.firstOrNull()?.take(120)})")
             } as? JsonObject ?: throw IllegalArgumentException("the reply must be a JSON object")
-            val unknown = root.keys - setOf("context", "questions", "reply")
-            if (unknown.isNotEmpty()) throw IllegalArgumentException("unknown keys ${unknown.sorted().joinToString()}; use only context, questions, reply")
+            // Extra keys are ignored: a repair call costs the user up to a minute, and they carry nothing.
             val reply = (root["reply"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()
                 ?.takeIf { it.isNotEmpty() } ?: throw IllegalArgumentException("reply must be a non-empty string")
             val context = when (val c = root["context"]) {
@@ -325,7 +348,11 @@ Guidance:
                 is JsonObject -> q
                 else -> throw IllegalArgumentException("questions must be an object keyed by question id, or null")
             }
-            return JevComposeResult(context, questions, reply)
+            // Lenient: suggestions are optional, and a malformed list is dropped rather than repaired.
+            val suggestions = (root["suggestions"] as? JsonArray).orEmpty()
+                .mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.trim()?.takeIf { t -> t.isNotEmpty() && t.length <= MAX_SUGGESTION_CHARS } }
+                .distinct().take(MAX_SUGGESTIONS)
+            return JevComposeResult(context, questions, reply, suggestions = suggestions)
         }
 
         /** A compact, credential-free account of one run, for the next compose turn. */

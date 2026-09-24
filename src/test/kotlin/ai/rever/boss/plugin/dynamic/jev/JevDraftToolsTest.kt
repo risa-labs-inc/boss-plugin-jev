@@ -184,7 +184,8 @@ class JevDraftToolsTest {
 
         val panel = f.vm.state.value
         assertEquals(runId, panel.selectedRunId)
-        assertEquals(JevPane.ANSWER, panel.pane)
+        assertEquals(JevPane.ANSWER, panel.side)
+        assertEquals(runId, (f.vm.compose.value.items.last() as JevThreadItem.Ran).runId)
         assertFalse(panel.running)
         assertEquals(JevRunSource.PLAYGROUND, f.vm.runs.value.first().source)
         assertEquals(panel.request, f.vm.runs.value.first().request)
@@ -237,7 +238,7 @@ class JevDraftToolsTest {
         val f = Fixture(ScriptedChat(composeReply(context = """{"customer":"Acme"}""")))
         val before = f.vm.state.value
         f.vm.setComposeInput("route support tickets")
-        f.vm.sendCompose()
+        f.vm.compose("route support tickets")
 
         val after = f.vm.state.value
         assertEquals(listOf("route", "urgent"), after.questions.map { it.id })
@@ -276,8 +277,9 @@ class JevDraftToolsTest {
         val chat = ScriptedChat().apply { failure = JevFailure(JevComposer.NO_MODEL, "Add a chat provider") }
         val f = Fixture(chat)
         assertFailsWith<JevFailure> { f.vm.compose("x") }
-        val error = f.vm.compose.value.error!!
-        assertTrue(error.needsProviders)
+        val failed = f.vm.compose.value.items.single() as JevThreadItem.Failed
+        assertTrue(failed.error.needsProviders)
+        assertEquals("x", failed.user)
         assertFalse(f.vm.compose.value.busy)
         assertTrue(f.vm.compose.value.turns.isEmpty())
     }

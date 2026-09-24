@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update as updateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -23,7 +24,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 enum class JevEditorMode { FORM, JSON }
-enum class JevPane { ASK, ANSWER }
+/** Narrow layouts show one of these as a tab; wide layouts keep CHAT on the left. */
+enum class JevPane { CHAT, DRAFT, ANSWER }
 
 data class JevRunError(val code: String, val message: String)
 
@@ -52,7 +54,11 @@ data class JevPlaygroundState(
     val runStartedAtMs: Long = 0,
     val error: JevRunError? = null,
     val selectedRunId: Long? = null,
-    val pane: JevPane = JevPane.ASK,
+    val pane: JevPane = JevPane.CHAT,
+    /** Right side of the two-pane layout: DRAFT or ANSWER. */
+    val side: JevPane = JevPane.DRAFT,
+    /** `<...>` values in the context that must be filled before running. */
+    val placeholders: List<JevPlaceholder> = emptyList(),
     val unseenRun: Boolean = false,
     val presetNames: List<String> = emptyList(),
     val notice: String? = null,
@@ -72,17 +78,45 @@ data class JevComposeError(val code: String, val message: String) {
     val needsProviders: Boolean get() = code in setOf(JevComposer.NO_GATEWAY, JevComposer.NO_MODEL, JevComposer.MODEL_UNROUTABLE)
 }
 
+/** One entry in the conversation column. */
+sealed interface JevThreadItem {
+    val id: Long
+
+    /** A compose turn: the user's message, the model's one-line reply, and the locally computed changes. */
+    data class Turn(
+        override val id: Long,
+        val user: String,
+        val reply: String,
+        val changes: List<JevChange>,
+        val suggestions: List<String> = emptyList(),
+        val issues: Int = 0,
+        val runId: Long? = null,
+        val reverted: Boolean = false,
+    ) : JevThreadItem
+
+    data class Failed(override val id: Long, val user: String, val error: JevComposeError) : JevThreadItem
+    data class Ran(override val id: Long, val runId: Long) : JevThreadItem
+    data class RunFailed(override val id: Long, val error: JevRunError) : JevThreadItem
+    data class Edited(override val id: Long, val byAgent: Boolean) : JevThreadItem
+}
+
+data class JevComposePending(val user: String, val stage: JevComposeStage, val startedAtMs: Long, val modelLabel: String)
+
 data class JevComposeState(
     val input: String = "",
-    val turns: List<JevComposeTurn> = emptyList(),
-    val busy: Boolean = false,
-    val error: JevComposeError? = null,
+    val items: List<JevThreadItem> = emptyList(),
+    val pending: JevComposePending? = null,
+    /** Undo applies only while the latest turn is the last thing that changed the draft. */
     val canRevert: Boolean = false,
-    val threadOpen: Boolean = true,
     val models: List<JevChatModel> = emptyList(),
     val model: JevChatModel? = null,
-    val modelsLoaded: Boolean = false,
-)
+) {
+    val busy: Boolean get() = pending != null
+    val turns: List<JevComposeTurn>
+        get() = items.filterIsInstance<JevThreadItem.Turn>().map { JevComposeTurn(it.user, it.reply, it.issues, it.runId, it.reverted) }
+    val latestTurn: JevThreadItem.Turn? get() = items.lastOrNull() as? JevThreadItem.Turn
+    val modelLabel: String get() = model?.label ?: "the default model"
+}
 
 enum class JevDraftMode { REPLACE, MERGE }
 
@@ -120,7 +154,11 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
     private val runLock = Any()
     private val composeLock = Any()
     private var runJob: Deferred<JevRunRecord?>? = null
-    private var composeJob: Job? = null
+    @Volatile private var composeJob: Job? = null
+    private val itemIds = java.util.concurrent.atomic.AtomicLong()
+
+    /** Wall clock for the drafting card; replaceable so renders can show elapsed time. */
+    internal var nowMs: () -> Long = System::currentTimeMillis
     @Volatile private var composeUndo: JevDraftContent? = null
     @Volatile private var newestSeenRun = 0L
     private val _state = MutableStateFlow(JevPlaygroundState().recomputed())
@@ -136,7 +174,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
                 val newest = runs.firstOrNull()?.id ?: 0L
                 if (newest > newestSeenRun) {
                     newestSeenRun = newest
-                    update { if (pane == JevPane.ASK) copy(unseenRun = true) else this }
+                    update { if (pane != JevPane.ANSWER) copy(unseenRun = true) else this }
                 }
             }
         }
@@ -231,137 +269,188 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
         change.model?.let { next = next.copy(model = it) }
         change.timeoutMs?.let { next = next.copy(timeoutMs = it) }
         next.copy(dirty = true).recomputed()
-    }
+    }.also { noteEdit(byAgent = true) }
 
     // ---- compose ----
     fun setComposeInput(value: String) = _compose.updateFlow { it.copy(input = value) }
-    fun toggleThread() = _compose.updateFlow { it.copy(threadOpen = !it.threadOpen) }
 
-    /** Reads the gateway's chat models and the remembered choice. Cheap; safe to repeat. */
+    /**
+     * Reads the gateway's chat models and the remembered choice, off the UI thread. An empty
+     * catalog is never treated as final: discovery may still be running, so it is read again.
+     */
     suspend fun refreshModels() {
         val chat = services.chat
-        val models = runCatching { chat.models() }.getOrDefault(emptyList())
+        val models = withContext(Dispatchers.Default) { runCatching { chat.models() }.getOrDefault(emptyList()) }
+        if (models.isEmpty()) return
         val remembered = runCatching { services.storage?.get(COMPOSE_MODEL_KEY) }.getOrNull()
             ?.let { runCatching { (Json.parseToJsonElement(it) as JsonObject)["model"] as? JsonPrimitive }.getOrNull()?.content }
         val chosen = models.firstOrNull { it.key == remembered } ?: runCatching { chat.defaultModel(models) }.getOrNull()
-        _compose.updateFlow { it.copy(models = models, model = it.model?.takeIf { m -> m in models } ?: chosen, modelsLoaded = true) }
+        _compose.updateFlow { it.copy(models = models, model = it.model?.takeIf { m -> m in models } ?: chosen) }
     }
 
     fun setComposeModel(model: JevChatModel) {
-        _compose.updateFlow { it.copy(model = model, error = null) }
+        _compose.updateFlow { it.copy(model = model) }
         val storage = services.storage ?: return
         scope.launch {
             runCatching { storage.put(COMPOSE_MODEL_KEY, buildJsonObject { put("model", model.key) }.toString()) }
         }
     }
 
-    /** Sends the composer input from the panel. */
-    fun sendCompose() {
-        val message = _compose.value.input.trim()
-        if (message.isEmpty() || _compose.value.busy) return
-        composeJob = scope.launch {
+    /** Sends [message], or the composer input, from the panel. */
+    fun sendCompose(message: String? = null) {
+        val text = (message ?: _compose.value.input).trim()
+        if (text.isEmpty() || _compose.value.busy) return
+        scope.launch {
             try {
-                compose(message)
+                compose(text)
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (_: Exception) {
-                // compose() already put the error in the thread state.
+            } catch (_: Throwable) {
+                // compose() already put the failure in the thread.
             }
         }
     }
 
+    /** Cancels the running compose turn, whether the panel or an MCP caller started it. */
     fun cancelCompose() {
-        composeJob?.cancel()
-        composeJob = null
+        composeJob?.cancel(CancellationException("Cancelled in the Jev panel"))
+    }
+
+    /** Sends a failed turn's message again. */
+    fun retryCompose(itemId: Long) {
+        val failed = _compose.value.items.firstOrNull { it.id == itemId } as? JevThreadItem.Failed ?: return
+        _compose.updateFlow { s -> s.copy(items = s.items.filterNot { it.id == itemId }) }
+        sendCompose(failed.user)
     }
 
     /**
      * One compose turn against the live draft: the chat model rewrites the context and/or
      * questions, the result lands through the normal recompute path, and the previous inputs
-     * are kept for one revert. Throws [JevFailure]; the error is also shown in the panel.
+     * are kept for one revert. Throws [JevFailure]; the failure also appears in the thread.
      */
     suspend fun compose(message: String): JevComposeResult {
         val text = message.trim()
         if (text.isEmpty()) throw JevFailure("INVALID_INPUT", "Describe what to decide", "message")
+        val job = currentCoroutineContext()[Job]
         synchronized(composeLock) {
             if (_compose.value.busy) throw JevFailure("BUSY", "A compose turn is already in progress")
-            _compose.updateFlow { it.copy(busy = true, error = null) }
-        }
-        try {
-            if (!_compose.value.modelsLoaded) refreshModels()
-            val s = _state.value
-            val draft = JevComposeDraft(
-                contextText = s.contextText,
-                sendAsText = s.sendAsText,
-                questions = s.questionsJson(),
-                questionsText = if (s.editorMode == JevEditorMode.JSON) s.jsonText else s.questions.toApi().toString(),
-                model = s.model,
-                timeoutMs = s.timeoutMs,
-            )
-            val threadState = _compose.value
-            // A run is summarized into the first turn after it, not repeated in every later turn.
-            val lastRun = decisionService.runs.value.firstOrNull()?.takeIf { run -> threadState.turns.none { it.runId == run.id } }
-            val result = services.composer.compose(text, draft, threadState.turns, lastRun?.let(JevComposer::summarizeRun), threadState.model)
-            var previous: JevDraftContent? = null
-            update {
-                previous = content()
-                var next = this
-                result.context?.let { next = next.copy(contextText = it, sendAsText = false) }
-                result.questions?.let { next = next.applyQuestions(it) }
-                next.copy(dirty = true, pane = JevPane.ASK).recomputed()
-            }
-            composeUndo = previous
+            // The message moves into the thread at once; a failure keeps it there with Retry.
             _compose.updateFlow {
                 it.copy(
-                    busy = false,
+                    pending = JevComposePending(text, JevComposeStage.Drafting, nowMs(), it.modelLabel),
                     input = if (it.input.trim() == text) "" else it.input,
-                    turns = it.turns + JevComposeTurn(text, result.reply, result.issues.size, lastRun?.id),
+                )
+            }
+            composeJob = job
+        }
+        try {
+            if (_compose.value.models.isEmpty()) refreshModels()
+            _compose.updateFlow { it.copy(pending = it.pending?.copy(modelLabel = it.modelLabel)) }
+            val s = _state.value
+            val beforeQuestions = s.questionsJson()
+            val thread = _compose.value
+            // The first message describes a new decision: an untouched starter or preset is not a draft to revise.
+            val fresh = thread.turns.isEmpty() && !s.dirty
+            val draft = if (fresh) {
+                JevComposeDraft("", sendAsText = false, questions = JsonObject(emptyMap()), questionsText = "{}", model = s.model, timeoutMs = s.timeoutMs)
+            } else {
+                JevComposeDraft(
+                    contextText = s.contextText,
+                    sendAsText = s.sendAsText,
+                    questions = beforeQuestions,
+                    questionsText = if (s.editorMode == JevEditorMode.JSON) s.jsonText else s.questions.toApi().toString(),
+                    model = s.model,
+                    timeoutMs = s.timeoutMs,
+                )
+            }
+            // A run is summarized into the first turn after it, not repeated in every later turn.
+            val lastRun = decisionService.runs.value.firstOrNull()?.takeIf { run -> thread.turns.none { it.runId == run.id } }
+            val result = services.composer.compose(
+                text, draft, thread.turns, lastRun?.let(JevComposer::summarizeRun), thread.model,
+                onStage = { stage -> _compose.updateFlow { it.copy(pending = it.pending?.copy(stage = stage)) } },
+            )
+            var previous: JevDraftContent? = null
+            val after = _state.updateAndGetAtomic { current ->
+                previous = current.content()
+                var next = current
+                result.context?.let { next = next.copy(contextText = it, sendAsText = false) }
+                result.questions?.let { next = next.applyQuestions(it) }
+                if (fresh) next = next.copy(presetName = null, title = "Untitled")
+                next.copy(dirty = true, pane = JevPane.CHAT, side = JevPane.DRAFT).recomputed()
+            }
+            composeUndo = previous
+            val changes = if (fresh) JevDraftDiff.between("", JsonObject(emptyMap()), after.contextText, after.questionsJson())
+            else JevDraftDiff.between(s.contextText, beforeQuestions, after.contextText, after.questionsJson())
+            _compose.updateFlow {
+                it.copy(
+                    items = it.items + JevThreadItem.Turn(nextItemId(), text, result.reply, changes, result.suggestions, result.issues.size, lastRun?.id),
                     canRevert = true,
-                    threadOpen = true,
                 )
             }
             return result
         } catch (cancelled: CancellationException) {
-            _compose.updateFlow { it.copy(busy = false) }
             throw cancelled
-        } catch (failure: JevFailure) {
-            _compose.updateFlow { it.copy(busy = false, error = JevComposeError(failure.code, failure.message)) }
-            throw failure
-        } catch (failure: Exception) {
-            val wrapped = JevFailure(JevComposer.COMPOSE_FAILED, failure.message?.take(240) ?: "Could not draft the request")
-            _compose.updateFlow { it.copy(busy = false, error = JevComposeError(wrapped.code, wrapped.message)) }
-            throw wrapped
+        } catch (failure: Throwable) {
+            // Throwable, not Exception: a linkage error from a mismatched host must not leave the turn pending forever.
+            val error = (failure as? JevFailure) ?: JevFailure(JevComposer.COMPOSE_FAILED, failure.message?.take(240) ?: "Could not draft the request")
+            _compose.updateFlow { it.copy(items = it.items + JevThreadItem.Failed(nextItemId(), text, JevComposeError(error.code, error.message))) }
+            throw error
+        } finally {
+            synchronized(composeLock) {
+                composeJob = null
+                _compose.updateFlow { it.copy(pending = null) }
+            }
         }
     }
 
     fun revertLastCompose() {
         val undo = composeUndo ?: return
         composeUndo = null
-        edit { restore(undo) }
+        update { restore(undo).copy(dirty = true).recomputed() }
         _compose.updateFlow { s ->
-            val last = s.turns.indexOfLast { !it.reverted }
+            val last = s.items.indexOfLast { it is JevThreadItem.Turn && !it.reverted }
             s.copy(
                 canRevert = false,
-                turns = if (last < 0) s.turns else s.turns.toMutableList().also { it[last] = it[last].copy(reverted = true) },
+                items = if (last < 0) s.items else s.items.toMutableList().also { it[last] = (it[last] as JevThreadItem.Turn).copy(reverted = true) },
             )
         }
-        notice("Reverted the last compose")
+        notice("Reverted the last change")
     }
 
-    fun dismissComposeError() = _compose.updateFlow { it.copy(error = null) }
+    /** Writes the given `<...>` values into the context; keys are [JevPlaceholder.key]. */
+    fun fillPlaceholders(values: Map<String, String>) = edit {
+        copy(contextText = JevPlaceholders.fill(contextText, contextFormat, values, placeholders))
+    }
 
     private fun resetCompose() {
         composeUndo = null
-        _compose.updateFlow { it.copy(turns = emptyList(), canRevert = false, error = null) }
+        _compose.updateFlow { it.copy(items = emptyList(), canRevert = false) }
     }
+
+    /** A manual or MCP edit after a turn gets one line in the thread, and ends that turn's undo. */
+    private fun noteEdit(byAgent: Boolean) {
+        _compose.updateFlow { s ->
+            if (s.items.isEmpty() || s.busy) return@updateFlow s
+            val last = s.items.last()
+            val items = if (last is JevThreadItem.Edited && last.byAgent == byAgent) s.items else s.items + JevThreadItem.Edited(nextItemId(), byAgent)
+            s.copy(items = items, canRevert = false)
+        }
+        composeUndo = null
+    }
+
+    private fun nextItemId(): Long = itemIds.incrementAndGet()
 
     // ---- running ----
     fun run() {
         when (val start = startRun()) {
             JevRunStart.MissingKey -> update {
-                copy(pane = JevPane.ANSWER, selectedRunId = null, error = JevRunError("MISSING_OPENROUTER_KEY", "Add an OpenRouter key in Secret Manager → AI Providers"))
+                copy(pane = JevPane.ANSWER, side = JevPane.ANSWER, selectedRunId = null, error = JevRunError("MISSING_OPENROUTER_KEY", "Add an OpenRouter key in Secret Manager → AI Providers"))
             }
-            is JevRunStart.Invalid -> notice(if (start.issues == 1) "Fix 1 issue before running" else "Fix ${start.issues} issues before running")
+            is JevRunStart.Invalid -> notice(when {
+                _state.value.placeholders.isNotEmpty() -> "Fill the ${_state.value.placeholders.size} marked fields before running"
+                start.issues == 1 -> "Fix 1 issue before running"
+                else -> "Fix ${start.issues} issues before running"
+            })
             else -> Unit
         }
     }
@@ -400,21 +489,23 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
         if (!hasOpenRouterKey()) return JevRunStart.MissingKey
         val snapshot = _state.value
         val request = snapshot.request ?: return JevRunStart.Invalid(snapshot.issues.size)
-        update { copy(running = true, runStartedAtMs = System.currentTimeMillis(), error = null, pane = JevPane.ANSWER, unseenRun = false) }
+        // The thread gets a compact answer card; the full answer is on the right when there is room.
+        update { copy(running = true, runStartedAtMs = System.currentTimeMillis(), error = null, side = JevPane.ANSWER, pane = if (pane == JevPane.ANSWER) pane else JevPane.CHAT) }
         val job = scope.async {
             try {
                 val decision = decisionService.decide(request, JevRunSource.PLAYGROUND)
                 val record = decisionService.runs.value.firstOrNull { it.decision === decision }
-                update { copy(running = false, selectedRunId = record?.id, unseenRun = false) }
+                update { copy(running = false, selectedRunId = record?.id, unseenRun = pane != JevPane.ANSWER && side != JevPane.ANSWER) }
+                record?.let { r -> _compose.updateFlow { it.copy(items = it.items + JevThreadItem.Ran(nextItemId(), r.id)) } }
                 record
             } catch (cancelled: CancellationException) {
                 update { copy(running = false) }
                 throw cancelled
-            } catch (failure: JevFailure) {
-                update { copy(running = false, selectedRunId = null, error = JevRunError(failure.code, failure.message)) }
-                null
-            } catch (_: Exception) {
-                update { copy(running = false, selectedRunId = null, error = JevRunError("SERVICE_UNAVAILABLE", "Jev could not complete the request")) }
+            } catch (failure: Exception) {
+                val error = (failure as? JevFailure)?.let { JevRunError(it.code, it.message) }
+                    ?: JevRunError("SERVICE_UNAVAILABLE", "Jev could not complete the request")
+                update { copy(running = false, selectedRunId = null, error = error) }
+                _compose.updateFlow { it.copy(items = it.items + JevThreadItem.RunFailed(nextItemId(), error)) }
                 null
             }
         }
@@ -431,7 +522,8 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
         notice("Run cancelled")
     }
 
-    fun selectRun(id: Long) = update { copy(selectedRunId = id, error = null, pane = JevPane.ANSWER) }
+    /** Shows a run in the Answer view: the right side when wide, the Answer tab when narrow. */
+    fun selectRun(id: Long) = update { copy(selectedRunId = id, error = null, pane = JevPane.ANSWER, side = JevPane.ANSWER, unseenRun = false) }
 
     fun restoreRun(id: Long) {
         val run = decisionService.runs.value.firstOrNull { it.id == id } ?: return
@@ -443,13 +535,16 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
                 sendAsText = state is JsonPrimitive && looksLikeJson(text),
                 timeoutMs = run.request.timeoutMs,
                 model = run.request.model,
-                pane = JevPane.ASK,
+                pane = JevPane.DRAFT,
+                side = JevPane.DRAFT,
             )
         }
         notice("Loaded run #${run.id} into the editor")
     }
 
-    fun setPane(pane: JevPane) = update { copy(pane = pane, unseenRun = if (pane == JevPane.ANSWER) false else unseenRun) }
+    fun setPane(pane: JevPane) = update {
+        copy(pane = pane, side = if (pane == JevPane.CHAT) side else pane, unseenRun = if (pane == JevPane.ANSWER) false else unseenRun)
+    }
 
     // ---- documents ----
     fun useStarter(starter: JevStarter) {
@@ -458,7 +553,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
                 presetName = null, title = starter.label, dirty = false,
                 contextText = starter.context, sendAsText = false,
                 questions = starter.questions(), editorMode = JevEditorMode.FORM, jsonError = null, jsonOnly = false,
-                timeoutMs = JevLimits.DEFAULT_TIMEOUT_MS, pane = JevPane.ASK,
+                timeoutMs = JevLimits.DEFAULT_TIMEOUT_MS, pane = JevPane.CHAT, side = JevPane.DRAFT,
             ).recomputed()
         }
         resetCompose()
@@ -471,7 +566,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
                 contextText = "", sendAsText = false,
                 questions = listOf(JevQuestionDraft.blank(JevQuestionType.CHOICE, "q1")),
                 editorMode = JevEditorMode.FORM, jsonError = null, jsonOnly = false,
-                timeoutMs = JevLimits.DEFAULT_TIMEOUT_MS, pane = JevPane.ASK,
+                timeoutMs = JevLimits.DEFAULT_TIMEOUT_MS, pane = JevPane.CHAT, side = JevPane.DRAFT,
             ).recomputed()
         }
         resetCompose()
@@ -537,7 +632,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
                         presetName = preset.name, title = preset.name, dirty = false,
                         contextText = preset.stateText,
                         sendAsText = !preset.stateAsJson && looksLikeJson(preset.stateText),
-                        timeoutMs = preset.timeoutMs, model = preset.model, pane = JevPane.ASK,
+                        timeoutMs = preset.timeoutMs, model = preset.model, pane = JevPane.CHAT, side = JevPane.DRAFT,
                     ).recomputed()
                 }
                 resetCompose()
@@ -643,6 +738,8 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
             is JevContextFormat.Json -> format.element
             is JevContextFormat.Text -> JsonPrimitive(contextText)
         }
+        val placeholders = JevPlaceholders.find(format, contextText)
+        placeholders.forEach { add(JevField.Placeholder(it.key), "Fill in ${it.token}", listOf("state") + it.path) }
         val questionsJson: JsonObject? = when (editorMode) {
             JevEditorMode.FORM -> draftIssues(questions).let { found ->
                 found.forEach { add(it.field, it.message, draftPath(it.field, questions)) }
@@ -670,7 +767,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
             }
             if (issues.isEmpty()) request = candidate
         }
-        return copy(contextFormat = format, issues = issues, apiIssues = apiIssues, request = request)
+        return copy(contextFormat = format, issues = issues, apiIssues = apiIssues, request = request, placeholders = placeholders)
     }
 
     /** API-style path for a form-only issue; a blank ID is named by its position. */
@@ -683,8 +780,10 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
         }
     }
 
-    private inline fun edit(crossinline block: JevPlaygroundState.() -> JevPlaygroundState) =
+    private inline fun edit(crossinline block: JevPlaygroundState.() -> JevPlaygroundState) {
         update { block().copy(dirty = true).recomputed() }
+        noteEdit(byAgent = false)
+    }
 
     private inline fun update(crossinline block: JevPlaygroundState.() -> JevPlaygroundState) = _state.updateFlow { it.block() }
 

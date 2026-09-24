@@ -58,6 +58,8 @@ internal object JevTokens {
     val TextSecondary = BossThemeColors.TextSecondary
     val TextMuted = BossThemeColors.TextMuted
     val Accent = BossThemeColors.AccentColor
+    /** Content on an accent fill, as BossPrimaryButton draws it. */
+    val OnAccent = Color.White
     val Error = BossThemeColors.ErrorColor
     val Success = BossThemeColors.SuccessColor
     val Warning = BossThemeColors.WarningColor
