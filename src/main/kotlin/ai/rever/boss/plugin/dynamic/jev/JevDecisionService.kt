@@ -64,7 +64,7 @@ class JevDecisionService(
                     val key = keyResolver.resolveOpenRouterKey()?.takeIf { it.isNotBlank() }
                         ?: throw JevFailure(
                             "MISSING_OPENROUTER_KEY",
-                            "Configure an OpenRouter key and select any model in Settings → AI Providers",
+                            "Configure an OpenRouter key and select any model in Secret Manager → AI Providers",
                         )
                     val started = System.nanoTime()
                     transport.post(bytes, key, request.timeoutMs, limits.maxResponseBytes)

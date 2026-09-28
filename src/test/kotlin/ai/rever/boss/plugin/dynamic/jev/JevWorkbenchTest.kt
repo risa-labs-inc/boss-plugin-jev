@@ -234,7 +234,7 @@ class JevWorkbenchTest {
         val mcpRun = services.service.runs.value.single()
         vm.restoreRun(mcpRun.id)
         assertEquals(mcpRun.request, vm.state.value.request)
-        assertEquals(JevPane.ASK, vm.state.value.pane)
+        assertEquals(JevPane.DRAFT, vm.state.value.pane)
         services.dispose()
     }
 

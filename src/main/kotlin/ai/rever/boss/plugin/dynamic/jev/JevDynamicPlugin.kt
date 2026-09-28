@@ -21,7 +21,7 @@ class JevDynamicPlugin : DynamicPlugin {
         context.panelRegistry.registerPanel(JevPanelInfo) { componentContext, info ->
             JevPanelComponent(componentContext, info, services)
         }
-        context.registerMcpToolProvider(JevMcpToolProvider(pluginId, services.service, services.presets))
+        context.registerMcpToolProvider(JevMcpToolProvider(pluginId, services.service, services.presets) { services.playground })
     }
 
     override fun dispose() {
