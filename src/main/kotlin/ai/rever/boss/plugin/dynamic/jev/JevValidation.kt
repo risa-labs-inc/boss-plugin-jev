@@ -167,8 +167,15 @@ internal object JevValidation {
     private fun probabilityMap(values: JsonObject, path: String) {
         var sum = 0.0
         values.forEach { (key, value) -> sum += probability(value, "$path.$key") }
-        if (abs(sum - 1.0) > 1e-6) malformed("$path must sum to 1")
+        if (abs(sum - 1.0) > sumTolerance(values.size)) malformed("$path must sum to 1")
     }
+
+    /**
+     * How far a probability map may drift from 1. The provider rounds each value, so the error
+     * grows with the number of options: a fixed 1e-6 rejected a sound answer over ~200 choices
+     * (LLM RPA offers one option per link on a page). Allows 3-decimal rounding per option.
+     */
+    internal fun sumTolerance(options: Int): Double = maxOf(1e-6, 5e-4 * options)
 
     private fun probability(value: JsonElement?, path: String): Double {
         val number = number(value, path)
