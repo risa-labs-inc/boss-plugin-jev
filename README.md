@@ -18,7 +18,7 @@ The panel is conversation-first. **Chat** is where you describe the decision and
 - **Context:** the format is detected from the text (JSON object, JSON array, or plain text). Text that looks like JSON but doesn't parse offers "Send as text".
 - **Questions:** typed cards for Yes/No (`noul`), Choice, and Score. Switching type keeps what was typed. A Form/JSON toggle syncs both ways. JSON that the form can't show faithfully, such as structured instructions, stays in JSON.
 - **Validation:** runs on every edit. Each issue appears under the field that caused it. The Run bar counts the issues, and clicking the count scrolls to the first one.
-- **Run bar:** Run (⌘↵) and a timeout picker, pinned under the composer. Copy as `jev_decide` arguments is in the Draft header, next to the question chips and the validation status. With an OpenRouter model and no key, Run becomes "Connect OpenRouter". With an unreachable local model, it becomes Refresh, and the Answer pane shows the provider's hint.
+- **Run bar:** Run (⌘↵) and a timeout picker, pinned under the composer. Copy as `jev_decide` arguments is in the Draft header, next to the question chips and the validation status. When the gateway reports that the selected model's provider needs a credential (`needsCredential`, today only OpenRouter without a key), Run becomes "Connect OpenRouter". When the provider is unreachable for any other reason, it becomes Refresh, and the Answer pane shows the provider's hint.
 - **Answers:** each card leads with the verdict, then shows the probabilities. Only the winning bar uses the accent color. A chip shows the change since the previous run from the same source, and a flipped verdict is amber.
 - **Run history:** a strip of the last 20 runs from the panel and from MCP, with MCP runs tagged. An MCP run can be loaded into the editor. A panel run whose inputs have been edited since offers Restore.
 
@@ -40,7 +40,7 @@ It returns JSON text containing `response`, `provider`, `local`, and `latency_ms
 
 `jev_presets` lists saved presets with their questions, model, provider, and timeout. It never returns saved context text.
 
-`jev_models` refreshes the catalog and lists each model's `id`, `provider`, `local`, `reachable`, and `detail`, plus each provider's status.
+`jev_models` refreshes the catalog and lists each model's `id`, `provider`, `local`, `reachable`, `needs_credential`, and `detail`, plus each provider's status.
 
 These tools act on the draft open in the panel, and each change shows there immediately. They work while the panel is closed.
 

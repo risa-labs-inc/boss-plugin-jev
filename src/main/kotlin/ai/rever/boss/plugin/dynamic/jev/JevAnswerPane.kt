@@ -75,10 +75,10 @@ internal fun AnswerPane(state: JevPlaygroundState, runs: List<JevRunRecord>, vie
                     when {
                         state.running -> RunningView(state)
                         error != null && state.selectedRunId == null ->
-                            if (error.code == JevDecisionErrors.MISSING_CREDENTIAL && state.modelOption?.providerId == JevModelCatalog.OPENROUTER) SetupCard(viewModel)
+                            if (error.code == JevDecisionErrors.MISSING_CREDENTIAL && state.modelOption?.needsCredential == true) SetupCard(viewModel)
                             else ErrorCard(error, state.modelOption, viewModel, hasRuns = runs.isNotEmpty())
                         displayed != null -> RunView(displayed, runs, state, viewModel, compact)
-                        state.readiness == JevReadiness.NeedsOpenRouterKey -> SetupCard(viewModel)
+                        state.readiness == JevReadiness.NeedsCredential -> SetupCard(viewModel)
                         state.readiness is JevReadiness.Unavailable -> UnavailableCard(state.readiness.detail, viewModel)
                         else -> Text(
                             "No answers yet. Run the draft and the full answer shows here: the verdict, every probability, and the change since the last run.",

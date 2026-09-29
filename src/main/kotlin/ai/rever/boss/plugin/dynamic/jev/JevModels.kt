@@ -24,6 +24,8 @@ data class JevModelOption(
     val reachable: Boolean = true,
     /** Why the provider is unusable, or where it listens. */
     val detail: String? = null,
+    /** The provider is unusable only because no credential is configured. */
+    val needsCredential: Boolean = false,
 )
 
 data class JevDecision(

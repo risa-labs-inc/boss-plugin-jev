@@ -246,7 +246,7 @@ class JevWorkbenchTest {
         val services = JevPluginServices(context(), transport, decisionApiOverride = { api })
         val vm = services.playground
         runBlocking { services.catalog.refresh() }
-        assertEquals(JevReadiness.NeedsOpenRouterKey, vm.state.value.readiness)
+        assertEquals(JevReadiness.NeedsCredential, vm.state.value.readiness)
         vm.run()
         assertEquals("MISSING_CREDENTIAL", vm.state.value.error?.code)
         assertEquals(JevPane.ANSWER, vm.state.value.pane)

@@ -62,7 +62,7 @@ class JevMcpToolProvider(
         McpToolDefinition(
             name = "jev_models",
             description = "List the decision models Jev can call, refreshed from the AI Gateway: id, provider, local, reachable, " +
-                "and detail (why a provider is unusable, or where it listens). Local models run on this machine and are free; " +
+                "needs_credential (only a credential is missing), and detail (why a provider is unusable, or where it listens). Local models run on this machine and are free; " +
                 "OpenRouter models are paid. Pass an id as `model`, and `provider` when two providers serve the same id.",
             inputSchema = """{"type":"object","additionalProperties":false,"properties":{}}""",
             readOnly = true,
@@ -128,6 +128,7 @@ class JevMcpToolProvider(
                         put("label", p.label)
                         put("local", p.local)
                         put("reachable", p.reachable)
+                        put("needs_credential", p.needsCredential)
                         p.detail?.let { put("detail", it) }
                     })
                 }
@@ -142,6 +143,7 @@ class JevMcpToolProvider(
         put("provider_label", option.providerLabel)
         put("local", option.local)
         put("reachable", option.reachable)
+        put("needs_credential", option.needsCredential)
         option.detail?.let { put("detail", it) }
     }
 

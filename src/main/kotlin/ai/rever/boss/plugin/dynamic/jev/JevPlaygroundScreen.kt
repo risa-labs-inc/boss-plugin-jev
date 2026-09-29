@@ -219,7 +219,7 @@ private fun ModelPicker(state: JevPlaygroundState, viewModel: JevPlaygroundViewM
     val color = if (ready) JevTokens.Success else JevTokens.Warning
     val label = when {
         model == null -> state.model
-        state.readiness == JevReadiness.NeedsOpenRouterKey -> if (compact) "Needs key" else "Needs OpenRouter key"
+        state.readiness == JevReadiness.NeedsCredential -> if (compact) "Needs key" else "Needs OpenRouter key"
         state.readiness is JevReadiness.Unavailable -> if (compact) "Unavailable" else "${model.label} · unavailable"
         compact -> model.label
         else -> "${model.label} · ${model.providerLabel}"
@@ -241,7 +241,7 @@ private fun ModelPicker(state: JevPlaygroundState, viewModel: JevPlaygroundViewM
             JevMenu(onDismiss = { open = false }, width = 300) {
                 providers.forEach { provider ->
                     MenuGroup(provider.label)
-                    // An unreachable provider says why: the missing key, or how to start the local runtime.
+                    // An unreachable provider says why: the missing credential, or how to start the local runtime.
                     if (!provider.reachable) provider.detail?.let {
                         Text(it, color = JevTokens.Warning, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
                     }

@@ -16,6 +16,7 @@ data class JevProviderStatus(
     val local: Boolean,
     val reachable: Boolean,
     val detail: String?,
+    val needsCredential: Boolean = false,
 )
 
 sealed interface JevModelLookup {
@@ -27,8 +28,8 @@ sealed interface JevModelLookup {
 /** Whether the selected model can be asked, and what the panel shows when it cannot. */
 sealed interface JevReadiness {
     data object Ready : JevReadiness
-    /** The selected model is on OpenRouter, and OpenRouter has no key. */
-    data object NeedsOpenRouterKey : JevReadiness
+    /** The selected model's provider reports that only a credential is missing. */
+    data object NeedsCredential : JevReadiness
     data class Unavailable(val detail: String) : JevReadiness
 }
 
@@ -44,8 +45,6 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
     private val _gatewayAvailable = MutableStateFlow(true)
     @Volatile var refreshed: Boolean = false
         private set
-    /** The gateway itself listed OpenRouter as unreachable, which means no key is configured. */
-    @Volatile private var openRouterKeyMissing = false
 
     /** OpenRouter first, then providers in gateway order. */
     val options: StateFlow<List<JevModelOption>> = _options.asStateFlow()
@@ -65,7 +64,6 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
                 null
             }
         }
-        openRouterKeyMissing = listed.orEmpty().any { it.providerId == OPENROUTER && !it.reachable }
         when {
             gateway == null -> publish(listOf(DEFAULT.copy(reachable = false, detail = GATEWAY_HINT)), emptyList(), gateway = false)
             listed == null -> publish(listOf(DEFAULT.copy(reachable = false, detail = LIST_FAILED)), emptyList(), gateway = true)
@@ -97,7 +95,10 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
             // A provider that is down lists no models; the gateway's error says why when called.
             if (!provider.reachable) {
                 return JevModelLookup.Found(
-                    JevModelOption(model, model, provider.providerId, provider.label, provider.local, reachable = false, detail = provider.detail),
+                    JevModelOption(
+                        model, model, provider.providerId, provider.label, provider.local, reachable = false,
+                        detail = provider.detail, needsCredential = provider.needsCredential,
+                    ),
                 )
             }
             val served = all.filter { it.providerId == provider.providerId }.joinToString { it.id }.ifEmpty { "no models" }
@@ -116,8 +117,9 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
     fun isDecisionModel(modelId: String): Boolean = _options.value.any { it.id == modelId }
 
     fun readiness(option: JevModelOption?): JevReadiness = when {
-        option == null || option.reachable -> JevReadiness.Ready
-        option.providerId == OPENROUTER && openRouterKeyMissing -> JevReadiness.NeedsOpenRouterKey
+        option == null -> JevReadiness.Ready
+        option.needsCredential -> JevReadiness.NeedsCredential
+        option.reachable -> JevReadiness.Ready
         else -> JevReadiness.Unavailable(option.detail ?: "${option.providerLabel} is not reachable")
     }
 
@@ -125,7 +127,7 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
         val listed = providers.map { it.providerId }.toSet()
         // Every option's provider is listed, so the picker can group and explain all of them.
         val synthesized = options.filter { it.providerId !in listed }.distinctBy { it.providerId }
-            .map { JevProviderStatus(it.providerId, it.providerLabel, it.local, it.reachable, it.detail) }
+            .map { JevProviderStatus(it.providerId, it.providerLabel, it.local, it.reachable, it.detail, it.needsCredential) }
         _providers.value = (synthesized + providers).sortedBy { it.providerId != OPENROUTER }
         _gatewayAvailable.value = gateway
         _options.value = options
@@ -146,7 +148,8 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
 
         val DEFAULT = JevModelOption("typesafe/jev-1.13", "jev-1.13", OPENROUTER, "OpenRouter")
 
-        private fun status(p: AiDecisionProvider) = JevProviderStatus(p.providerId, p.providerName, p.local, p.reachable, p.detail)
+        private fun status(p: AiDecisionProvider) =
+            JevProviderStatus(p.providerId, p.providerName, p.local, p.reachable, p.detail, p.needsCredential)
 
         private fun describe(all: List<JevModelOption>) = all.joinToString { "${it.id} (${it.providerLabel})" }
 
@@ -157,11 +160,19 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
         internal fun merge(providers: List<AiDecisionProvider>, previous: List<JevModelOption>): List<JevModelOption> {
             val out = providers.flatMap { p ->
                 val models = p.models.map { m ->
-                    JevModelOption(m.id, m.displayName.ifBlank { m.id }, p.providerId, p.providerName, p.local, p.reachable, p.detail)
+                    JevModelOption(
+                        m.id, m.displayName.ifBlank { m.id }, p.providerId, p.providerName, p.local, p.reachable, p.detail,
+                        p.needsCredential,
+                    )
                 }
                 val kept = if (!p.reachable && models.isEmpty()) {
                     previous.filter { it.providerId == p.providerId }
-                        .map { it.copy(providerLabel = p.providerName, local = p.local, reachable = false, detail = p.detail) }
+                        .map {
+                            it.copy(
+                                providerLabel = p.providerName, local = p.local, reachable = false, detail = p.detail,
+                                needsCredential = p.needsCredential,
+                            )
+                        }
                 } else {
                     emptyList()
                 }
@@ -173,6 +184,7 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
                     providerLabel = openRouter?.providerName ?: DEFAULT.providerLabel,
                     reachable = openRouter?.reachable ?: true,
                     detail = openRouter?.detail,
+                    needsCredential = openRouter?.needsCredential ?: false,
                 ))
             }
             return out.distinctBy { it.providerId to it.id }.sortedBy { it.providerId != OPENROUTER }

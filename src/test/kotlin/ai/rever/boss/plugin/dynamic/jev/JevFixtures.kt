@@ -61,10 +61,14 @@ internal class FakeDecisionApi(
     override suspend fun decide(request: AiDecisionRequest): Result<AiDecisionReply> { requests += request; return reply(request) }
 }
 
-internal fun openRouter(reachable: Boolean = true) = AiDecisionProvider(
+internal fun openRouter(
+    reachable: Boolean = true,
+    needsCredential: Boolean = !reachable,
+    detail: String? = if (needsCredential) "Add an OpenRouter key in Secret Manager → AI Providers" else null,
+) = AiDecisionProvider(
     "OPENROUTER", "OpenRouter", local = false, reachable = reachable,
     models = listOf(AiDecisionModel("typesafe/jev-1.13", "jev-1.13")),
-    detail = if (reachable) null else "Add an OpenRouter key in Secret Manager → AI Providers",
+    detail = detail, needsCredential = needsCredential,
 )
 
 internal fun localRuntime(reachable: Boolean = true, vararg models: String = arrayOf("laya:en", "laya:multilingual")) = AiDecisionProvider(

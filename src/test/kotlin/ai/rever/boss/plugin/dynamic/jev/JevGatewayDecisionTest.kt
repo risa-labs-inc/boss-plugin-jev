@@ -130,6 +130,42 @@ class JevGatewayDecisionTest {
     }
 
     @Test
+    fun `needsCredential, not reachability, is what asks for a key`() = runTest {
+        val api = FakeDecisionApi(listOf(openRouter(reachable = false), localRuntime()))
+        val catalog = catalogOf(api)
+        val jev = catalog.find("typesafe/jev-1.13", null)!!
+        assertTrue(jev.needsCredential)
+        assertTrue(catalog.providers.value.single { it.providerId == "OPENROUTER" }.needsCredential)
+        assertEquals(JevReadiness.NeedsCredential, catalog.readiness(jev))
+        assertFalse(catalog.find("laya:en", null)!!.needsCredential)
+
+        // Unreachable for another reason: its detail and Refresh, never the key card.
+        api.providers = listOf(openRouter(reachable = false, needsCredential = false, detail = "OpenRouter did not answer"), localRuntime())
+        catalog.refresh()
+        val down = catalog.find("typesafe/jev-1.13", null)!!
+        assertFalse(down.needsCredential)
+        assertEquals(JevReadiness.Unavailable("OpenRouter did not answer"), catalog.readiness(down))
+        assertFalse(catalog.providers.value.single { it.providerId == "OPENROUTER" }.needsCredential)
+    }
+
+    @Test
+    fun `needsCredential is carried on models kept from before, on a named down provider, and on the default`() = runTest {
+        val keyed = AiDecisionProvider("KEYED", "Keyed", local = false, reachable = true, models = listOf(AiDecisionModel("k-1")))
+        val api = FakeDecisionApi(listOf(openRouter(), keyed))
+        val catalog = catalogOf(api)
+        api.providers = listOf(keyed.copy(reachable = false, models = emptyList(), detail = "Add a key", needsCredential = true))
+        catalog.refresh()
+        val kept = catalog.find("k-1", null)!!
+        assertTrue(kept.needsCredential)
+        assertEquals(JevReadiness.NeedsCredential, catalog.readiness(kept))
+        assertTrue(catalog.find("k-2", "KEYED")!!.needsCredential)
+
+        api.providers = listOf(openRouter(reachable = false).copy(models = emptyList()))
+        catalog.refresh()
+        assertTrue(catalog.find("typesafe/jev-1.13", null)!!.needsCredential)
+    }
+
+    @Test
     fun `a preset naming a provider that is down still resolves, so the gateway reports why`() = runTest {
         val catalog = catalogOf(FakeDecisionApi(listOf(openRouter(), localRuntime(reachable = false))))
         val option = catalog.find("laya:en", "LOCAL_SYSTEMONE")!!
@@ -225,6 +261,9 @@ class JevGatewayDecisionTest {
         assertEquals("OPENROUTER", jev["provider"]!!.jsonPrimitive.content)
         assertEquals("false", jev["reachable"]!!.jsonPrimitive.content)
         assertTrue(jev["detail"]!!.jsonPrimitive.content.contains("OpenRouter key"))
+        assertEquals("true", jev["needs_credential"]!!.jsonPrimitive.content)
+        val openRouterStatus = body["providers"]!!.jsonArray.map { it.jsonObject }.single { it["provider"]!!.jsonPrimitive.content == "OPENROUTER" }
+        assertEquals("true", openRouterStatus["needs_credential"]!!.jsonPrimitive.content)
         val laya = models.first { it["id"]!!.jsonPrimitive.content == "laya:en" }
         assertEquals("true", laya["local"]!!.jsonPrimitive.content)
         assertEquals("LOCAL_SYSTEMONE", laya["provider"]!!.jsonPrimitive.content)

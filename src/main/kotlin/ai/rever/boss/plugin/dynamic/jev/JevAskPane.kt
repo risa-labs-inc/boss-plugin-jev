@@ -350,7 +350,7 @@ internal fun RunBar(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel
     ) {
         val center = Modifier.align(Alignment.CenterVertically)
         when {
-            state.readiness == JevReadiness.NeedsOpenRouterKey ->
+            state.readiness == JevReadiness.NeedsCredential ->
                 BossPrimaryButton("Connect OpenRouter", onClick = viewModel::openSettings, modifier = center.height(32.dp))
             state.readiness is JevReadiness.Unavailable ->
                 BossSecondaryButton("Refresh", onClick = viewModel::refreshCatalog, modifier = center.height(32.dp))
