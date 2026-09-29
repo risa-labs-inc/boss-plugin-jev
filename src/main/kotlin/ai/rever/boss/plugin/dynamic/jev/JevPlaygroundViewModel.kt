@@ -169,7 +169,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
     internal var nowMs: () -> Long = System::currentTimeMillis
     @Volatile private var composeUndo: JevDraftContent? = null
     @Volatile private var newestSeenRun = 0L
-    /** AI Providers was opened from the panel; the next return to the panel re-reads the catalog. */
+    /** AI Providers was opened from the panel; each return to the panel re-reads the catalog until the model is ready. */
     private val settingsOpened = java.util.concurrent.atomic.AtomicBoolean(false)
     /** The latest panel-started catalog refresh; tests join it. */
     @Volatile internal var catalogRefresh: Job? = null
@@ -263,8 +263,18 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
     fun setModel(id: String, providerId: String?) = edit { copy(model = id, providerId = providerId) }
 
     /** Re-reads the decision models; local providers are probed live, so never on the UI thread. */
-    fun refreshCatalog() {
-        catalogRefresh = scope.launch(Dispatchers.Default) { runCatching { services.catalog.refresh() } }
+    fun refreshCatalog() = refreshCatalog(afterSettings = false)
+
+    /** Concurrent calls share the catalog's in-flight probe. */
+    private fun refreshCatalog(afterSettings: Boolean) {
+        catalogRefresh = scope.launch(Dispatchers.Default) {
+            runCatching { services.catalog.refresh() }
+            ensureActive()
+            // Kept until the model is ready, so a pass over the panel before the key is saved does not use it up.
+            if (afterSettings && _state.updateAndGetAtomic { it.recomputed() }.readiness == JevReadiness.Ready) {
+                settingsOpened.set(false)
+            }
+        }
     }
 
     /**
@@ -272,12 +282,13 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
      * model is not ready, so a key added elsewhere unlocks Run. Event-driven only, never polled.
      */
     fun onWindowFocused() {
-        if (settingsOpened.getAndSet(false) or (_state.value.readiness != JevReadiness.Ready)) refreshCatalog()
+        val afterSettings = settingsOpened.get()
+        if (afterSettings || _state.value.readiness != JevReadiness.Ready) refreshCatalog(afterSettings)
     }
 
-    /** The pointer came back into the panel; re-reads only after AI Providers was opened from it. */
+    /** The pointer came back into the panel; re-reads, once per return, until AI Providers made the model ready. */
     fun onPointerReturned() {
-        if (settingsOpened.getAndSet(false)) refreshCatalog()
+        if (settingsOpened.get()) refreshCatalog(afterSettings = true)
     }
 
     // ---- draft over MCP ----
@@ -734,8 +745,8 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
     }
 
     fun openSettings() {
-        settingsOpened.set(true)
-        if (!services.openAiProviderSettings()) notice("Open Secret Manager → AI Providers to add a provider key")
+        if (services.openAiProviderSettings()) settingsOpened.set(true)
+        else notice("Open Secret Manager → AI Providers to add a provider key")
     }
 
     fun dismissNotice(serial: Long) = update { if (noticeSerial == serial) copy(notice = null) else this }

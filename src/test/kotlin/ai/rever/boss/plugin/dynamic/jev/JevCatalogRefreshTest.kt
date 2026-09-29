@@ -239,6 +239,48 @@ class JevCatalogRefreshTest {
         services.dispose()
     }
 
+    @Test
+    fun `a return to the panel before the key is saved does not use up the refresh`() {
+        val api = FakeDecisionApi(listOf(openRouter(reachable = false), localRuntime()))
+        val services = JevPluginServices(hostContext(), CapturingBackend(), decisionApiOverride = { api })
+        val vm = services.playground
+        runBlocking { services.catalog.refresh() }
+        vm.openSettings()
+        val before = api.listings
+
+        // The pointer passes over the panel while the key is still being typed.
+        vm.onPointerReturned()
+        vm.awaitCatalog()
+        assertEquals(before + 1, api.listings)
+        assertEquals(JevReadiness.NeedsCredential, vm.state.value.readiness)
+
+        api.providers = listOf(openRouter(), localRuntime())
+        vm.onPointerReturned()
+        vm.awaitCatalog()
+        assertEquals(before + 2, api.listings)
+        assertEquals(JevReadiness.Ready, vm.state.value.readiness)
+
+        // Ready: the flag is spent, so a later return does not probe.
+        vm.onPointerReturned()
+        assertEquals(before + 2, api.listings)
+        services.dispose()
+    }
+
+    @Test
+    fun `opening AI Providers arms the return refresh only when it opened`() {
+        val api = FakeDecisionApi(listOf(openRouter(reachable = false), localRuntime()))
+        val services = JevPluginServices(context(), CapturingBackend(), decisionApiOverride = { api })
+        val vm = services.playground
+        runBlocking { services.catalog.refresh() }
+        val before = api.listings
+        vm.openSettings()
+        assertTrue(vm.state.value.notice!!.contains("AI Providers"))
+        vm.onPointerReturned()
+        vm.awaitCatalog()
+        assertEquals(before, api.listings)
+        services.dispose()
+    }
+
     // ---- run bar ----
 
     @Test
