@@ -15,7 +15,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -232,7 +231,8 @@ class JevCatalogRefreshTest {
         runBlocking { services.catalog.refresh() }
         vm.useAllTypes()
         vm.setModel("laya:en", null)
-        assertNull(vm.state.value.providerId)
+        // The inferred provider is stored, so it pins like an explicit one.
+        assertEquals("LOCAL_SYSTEMONE", vm.state.value.providerId)
         val record = runBlocking { vm.runDraft() }
         assertEquals(listOf("LOCAL_SYSTEMONE"), api.requests.map { it.providerId })
         assertTrue(record.decision.model.local)

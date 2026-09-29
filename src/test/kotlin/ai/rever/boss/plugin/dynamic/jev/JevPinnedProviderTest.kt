@@ -146,7 +146,7 @@ class JevPinnedProviderTest {
 
     // ---- the panel draft ----
 
-    private class Draft(providers: List<AiDecisionProvider>) {
+    private class Draft(providers: List<AiDecisionProvider>, pinLocal: Boolean = true) {
         val api = FakeDecisionApi(providers)
         val services = JevPluginServices(
             object : PluginContext {
@@ -160,8 +160,10 @@ class JevPinnedProviderTest {
         val mcp = JevMcpToolProvider("p", services.service, services.presets) { services.playground }
 
         init {
-            vm.applyDraft(JevDraftChange(contextText = "PHI", questions = requestAllTypes().questions))
-            vm.setModel("laya:en", LOCAL)
+            if (pinLocal) {
+                vm.applyDraft(JevDraftChange(contextText = "PHI", questions = requestAllTypes().questions))
+                vm.setModel("laya:en", LOCAL)
+            }
         }
 
         fun call(block: suspend JevMcpToolProvider.() -> McpToolResult) = runBlocking { mcp.block() }
@@ -217,6 +219,77 @@ class JevPinnedProviderTest {
         assertEquals(LOCAL, testJson.parseToJsonElement(saved.text).jsonObject["provider"]!!.jsonPrimitive.content)
         val same = d.call { presetSave(McpToolArgs(emptyMap(), """{"name":"z"}""")) }
         assertEquals(LOCAL, testJson.parseToJsonElement(same.text).jsonObject["provider"]!!.jsonPrimitive.content)
+        d.services.dispose()
+    }
+
+    // ---- an inferred provider pins like an explicit one ----
+
+    private val q get() = requestAllTypes().questions
+
+    private fun McpToolResult.body() = testJson.parseToJsonElement(text).jsonObject
+    private fun McpToolResult.provider() = body()["provider"]?.jsonPrimitive?.content
+
+    @Test
+    fun `an inferred local draft refuses an explicit OpenRouter model, and nothing reaches OpenRouter`() {
+        val d = Draft(listOf(openRouter(), localRuntime(true, "laya:en")), pinLocal = false)
+        val set = d.call { draftSet(McpToolArgs(emptyMap(), """{"state":"PHI patient","questions":$q,"model":"laya:en"}""")) }
+        assertFalse(set.isError, set.text)
+        assertEquals(LOCAL, set.provider())
+        assertEquals(LOCAL, d.vm.state.value.providerId)
+        assertEquals(LOCAL, d.call { draftGet(McpToolArgs(emptyMap(), "{}")) }.provider())
+        val moved = d.call { draftSet(McpToolArgs(emptyMap(), """{"model":"$JEV"}""")) }
+        assertTrue(moved.isError, moved.text)
+        assertEquals("INVALID_INPUT" to "provider", moved.body()["error"]!!.jsonObject.let { it["code"]!!.jsonPrimitive.content to it["path"]!!.jsonPrimitive.content })
+        assertEquals("laya:en" to LOCAL, d.vm.state.value.model to d.vm.state.value.providerId)
+        val saved = d.call { presetSave(McpToolArgs(emptyMap(), """{"name":"x","model":"$JEV"}""")) }
+        assertEquals("provider", saved.path(), saved.text)
+        d.call { draftRun(McpToolArgs(emptyMap(), "{}")) }
+        assertEquals(listOf(LOCAL), d.api.requests.map { it.providerId })
+        d.services.dispose()
+    }
+
+    @Test
+    fun `an inferred OpenRouter draft is not moved to local`() {
+        val d = Draft(listOf(openRouter(), localUp), pinLocal = false)
+        assertFalse(d.call { draftSet(McpToolArgs(emptyMap(), """{"state":"x","questions":$q,"model":"$JEV"}""")) }.isError)
+        assertEquals("OPENROUTER", d.vm.state.value.providerId)
+        val moved = d.call { draftSet(McpToolArgs(emptyMap(), """{"model":"laya:en"}""")) }
+        assertEquals("provider", moved.path(), moved.text)
+        assertEquals("OPENROUTER", d.call { draftGet(McpToolArgs(emptyMap(), "{}")) }.provider())
+        d.call { draftRun(McpToolArgs(emptyMap(), "{}")) }
+        assertEquals(listOf("OPENROUTER"), d.api.requests.map { it.providerId })
+        d.services.dispose()
+    }
+
+    @Test
+    fun `an inferred pin and an explicit pin give the same results`() {
+        fun trace(first: String): List<Any?> {
+            val d = Draft(listOf(openRouter(), localUp), pinLocal = false)
+            val out = mutableListOf<Any?>()
+            val calls = listOf(first, """{"model":"$JEV"}""", """{"model":"laya:multilingual"}""", """{"model":"$JEV","provider":"OPENROUTER"}""")
+            calls.forEach { raw ->
+                val r = d.call { draftSet(McpToolArgs(emptyMap(), raw)) }
+                out.add(listOf(r.isError, r.path(), d.vm.state.value.model, d.vm.state.value.providerId, d.call { draftGet(McpToolArgs(emptyMap(), "{}")) }.provider()))
+            }
+            d.call { draftRun(McpToolArgs(emptyMap(), "{}")) }
+            out.add(d.api.requests.map { it.providerId })
+            d.services.dispose()
+            return out
+        }
+        val inferred = trace("""{"state":"x","questions":$q,"model":"laya:en"}""")
+        assertEquals(inferred, trace("""{"state":"x","questions":$q,"model":"laya:en","provider":"$LOCAL"}"""))
+        assertEquals(listOf(true, "provider", "laya:en", LOCAL, LOCAL), inferred[1])
+    }
+
+    @Test
+    fun `a model the catalog has not resolved has no pin until it does`() {
+        val d = Draft(listOf(openRouter(), localUp), pinLocal = false)
+        d.vm.applyDraft(JevDraftChange(contextText = "x", questions = q, model = "laya:en"))
+        assertEquals(null, d.vm.state.value.providerId)
+        assertEquals(null, d.vm.pinnedProvider())
+        runBlocking { d.vm.loadCatalog() }
+        assertEquals(LOCAL, d.vm.state.value.providerId)
+        assertEquals("provider", assertFailsWith<JevFailure> { d.vm.applyDraft(JevDraftChange(model = JEV)) }.path)
         d.services.dispose()
     }
 

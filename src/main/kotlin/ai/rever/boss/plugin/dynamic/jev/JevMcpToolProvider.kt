@@ -249,12 +249,13 @@ class JevMcpToolProvider(
         val model = root["model"]?.let { stringArg(it, "model") }
         val provider = root["provider"]?.let { stringArg(it, "provider") }
         val current = vm.state.value
+        val draftProvider = vm.pinnedProvider(current)
         // Always: the returned issues must not depend on catalog warmth. The draft's provider pins another model.
         val loaded = service.loadCatalog(
             root["timeout_ms"]?.let { longArg(it, "timeout_ms") } ?: current.timeoutMs,
             model ?: current.model,
-            provider ?: current.providerId.takeIf { model == null || model == current.model },
-            current.providerId.takeIf { model != null && provider == null && model != current.model },
+            provider ?: draftProvider.takeIf { model == null || model == current.model },
+            draftProvider.takeIf { model != null && provider == null && model != current.model },
         )
         val change = JevDraftChange(
             contextText = contextText,
@@ -296,12 +297,17 @@ class JevMcpToolProvider(
         val draft = vm.state.value
         // Saving the draft keeps its provider: bound to its own model, a pin for another one.
         val fromDraft = questions == null && provider == null
-        val bound = provider ?: draft.providerId.takeIf { fromDraft && model == draft.model }
-        val pin = draft.providerId.takeIf { fromDraft && model != null && model != draft.model }
+        fun bound(p: String?) = provider ?: p.takeIf { fromDraft && model == draft.model }
+        fun pin(p: String?) = p.takeIf { fromDraft && model != null && model != draft.model }
+        val before = vm.pinnedProvider(draft)
         // A preset must not be resolved against a cold catalog.
-        if (!service.loadCatalog(timeout ?: draft.timeoutMs, model, bound, pin)) {
+        if (!service.loadCatalog(timeout ?: draft.timeoutMs, model, bound(before), pin(before))) {
             throw JevFailure("TIMEOUT", "The model catalog did not load in time; try again")
         }
+        // Re-read: a model the cold catalog could not resolve may resolve now.
+        val after = vm.pinnedProvider(draft)
+        val bound = bound(after)
+        val pin = pin(after)
         if (model != null) {
             val request = JevRequest(
                 JsonPrimitive("preset"), questions ?: JsonObject(emptyMap()), model = model, providerId = bound, pinnedProviderId = pin,
@@ -359,7 +365,7 @@ class JevMcpToolProvider(
             put("questions_text", s.jsonText)
         }
         put("model", s.model)
-        (s.modelOption?.providerId ?: s.providerId)?.let { put("provider", it) }
+        (s.providerId ?: s.modelOption?.providerId)?.let { put("provider", it) }
         s.modelOption?.let { put("local", it.local); put("reachable", it.reachable); it.detail?.let { d -> put("model_detail", d) } }
         put("timeout_ms", s.timeoutMs)
         put("valid", s.request != null)
