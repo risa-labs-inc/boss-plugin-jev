@@ -97,7 +97,8 @@ class JevWorkbenchTest {
             model = "local/unknown",
         )
         val paths = JevValidation.requestIssues(request, JevLimits(), JevModelCatalog()).map { it.pathText }
-        assertEquals(listOf("model", "timeout_ms", "questions.r.instructions", "questions.r.criteria.1", "questions.c.criteria"), paths)
+        // Body first, then model: the order jev_decide checks them in.
+        assertEquals(listOf("timeout_ms", "questions.r.instructions", "questions.r.criteria.1", "questions.c.criteria", "model"), paths)
     }
 
     @Test

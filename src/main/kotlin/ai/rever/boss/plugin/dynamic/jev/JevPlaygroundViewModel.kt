@@ -282,6 +282,12 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
 
     // ---- draft over MCP ----
 
+    /** Loads a cold catalog and re-validates the draft against it now, not when the collector runs. */
+    internal suspend fun loadCatalog(): JevPlaygroundState {
+        withContext(Dispatchers.Default) { services.catalog.ensureLoaded() }
+        return _state.updateAndGetAtomic { it.recomputed() }
+    }
+
     /**
      * Applies [change] in one atomic step and returns the new state. Merge upserts questions by
      * ID in place, then [JevDraftChange.removeQuestions] deletes. Never runs.
@@ -499,6 +505,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
      * Answer pane and history. Returns the run, or throws [JevFailure].
      */
     suspend fun runDraft(): JevRunRecord {
+        loadCatalog()
         val job = when (val start = startRun()) {
             JevRunStart.Busy -> throw JevFailure("BUSY", "A run is already in progress in the Jev panel")
             is JevRunStart.Invalid -> throw JevFailure("INVALID_INPUT", "The draft has ${start.issues} issue(s); read them with jev_draft_get")
@@ -647,7 +654,8 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
         timeoutMs: Long? = null,
     ): JevPreset {
         val repo = services.presets ?: throw JevFailure("PRESET_STORAGE_ERROR", "Preset storage is unavailable")
-        val value = _state.value
+        // The draft's provider is resolved against a loaded catalog, never the cold default.
+        val value = loadCatalog()
         val preset = if (questions != null) {
             JevPreset(name, "", questions.toString(), stateAsJson = false, timeoutMs ?: JevLimits.DEFAULT_TIMEOUT_MS, model ?: JevModelCatalog.DEFAULT.id, providerId)
         } else {
@@ -807,7 +815,9 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
         }
         var request: JevRequest? = null
         if (stateElement != null && questionsJson != null) {
-            val candidate = JevRequest(stateElement, questionsJson, timeoutMs, model, option?.providerId ?: providerId)
+            // A cold catalog lists only the default, so its match is not pinned; the service resolves after loading.
+            val resolvedProvider = if (catalog.refreshed) option?.providerId else null
+            val candidate = JevRequest(stateElement, questionsJson, timeoutMs, model, resolvedProvider ?: providerId)
             JevValidation.requestIssues(candidate, limits, catalog).forEach { issue ->
                 val field = if (issue.path.firstOrNull() in MODEL_PATHS) JevField.Model
                 else if (editorMode == JevEditorMode.FORM) fieldFor(issue, questions)

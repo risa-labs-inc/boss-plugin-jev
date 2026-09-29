@@ -38,7 +38,7 @@ class JevDecisionService(
 
     suspend fun decide(request: JevRequest, source: JevRunSource = JevRunSource.PLAYGROUND): JevDecision {
         val decision = execute(request)
-        val resolved = request.copy(providerId = decision.model.providerId)
+        val resolved = request.copy(providerId = decision.model.providerId, preferredProviderId = null)
         val record = JevRunRecord(runIds.incrementAndGet(), Instant.now(), source, resolved, decision)
         _runs.update { (listOf(record) + it).take(limits.maxRunHistory) }
         return decision
@@ -62,11 +62,12 @@ class JevDecisionService(
         val operation = async(start = CoroutineStart.LAZY) {
             withTimeoutOrNull(request.timeoutMs) {
                 ensureOpen()
-                // An unknown id refreshes before it is rejected, admitted and under the deadline.
-                catalog.ensure(request.model, request.providerId)
-                JevValidation.modelIssues(request, catalog).firstOrNull()?.let { throw JevFailure("INVALID_INPUT", it.message, it.pathText) }
+                // Loads a cold catalog, and refreshes for an unknown id, admitted and under the deadline.
+                catalog.ensure(request.model, request.providerId, request.preferredProviderId)
+                val resolved = request.resolvedWith(catalog)
+                JevValidation.modelIssues(resolved, catalog).firstOrNull()?.let { throw JevFailure("INVALID_INPUT", it.message, it.pathText) }
                 // Exactly this provider; the gateway never falls back, and neither does Jev.
-                val model = catalog.find(request.model, request.providerId)
+                val model = catalog.find(resolved.model, resolved.providerId)
                     ?: throw JevFailure("INVALID_INPUT", "Unknown model '${request.model}'", "model")
                 providerLabel = model.providerLabel
                 permits.withPermit {

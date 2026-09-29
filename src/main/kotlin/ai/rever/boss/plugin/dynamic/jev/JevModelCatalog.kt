@@ -107,9 +107,16 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
         refreshed = true
     }
 
-    /** Refreshes when [model] is not known yet, so a model pulled since the last refresh is accepted. */
-    suspend fun ensure(model: String, providerId: String?) {
-        val found = lookup(model, providerId)
+    /**
+     * Loads the catalog once, so resolution never depends on warmth, then refreshes when [model]
+     * is still unknown, so a model pulled since the last refresh is accepted.
+     */
+    suspend fun ensure(model: String, providerId: String?, preferredProviderId: String? = null) {
+        if (!refreshed) {
+            refresh()
+            return
+        }
+        val found = lookup(model, providerFor(model, providerId, preferredProviderId))
         if (found is JevModelLookup.Unknown) refresh()
     }
 
@@ -143,6 +150,18 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
             1 -> JevModelLookup.Found(byId.single())
             else -> JevModelLookup.Ambiguous(model, byId.map { it.providerId })
         }
+    }
+
+    /**
+     * [providerId] when set; else [preferredProviderId] when it serves [model], or is a local
+     * provider that is down (its models are unknown, and state must not leave the machine);
+     * else null, inferred from [model].
+     */
+    fun providerFor(model: String, providerId: String?, preferredProviderId: String?): String? {
+        if (providerId != null || preferredProviderId == null) return providerId
+        val serves = _options.value.any { it.id == model && it.providerId.equals(preferredProviderId, ignoreCase = true) }
+        val localDown = providerStatus(preferredProviderId)?.let { it.local && !it.reachable } == true
+        return preferredProviderId.takeIf { serves || localDown }
     }
 
     fun find(model: String, providerId: String?): JevModelOption? =

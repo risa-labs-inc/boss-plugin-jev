@@ -17,9 +17,9 @@ internal object JevValidation {
         requestIssues(request, limits, catalog).firstOrNull()?.let { throw JevFailure("INVALID_INPUT", it.message, it.pathText) }
     }
 
-    /** Every request problem, each with the path of the field that caused it. */
+    /** Every request problem, each with its path; body first, in the order jev_decide reports them. */
     fun requestIssues(request: JevRequest, limits: JevLimits, catalog: JevModelCatalog): List<JevIssue> =
-        modelIssues(request, catalog) + bodyIssues(request, limits)
+        bodyIssues(request, limits) + modelIssues(request.resolvedWith(catalog), catalog)
 
     /** The model must be in the catalog; an id several providers serve must name one. */
     fun modelIssues(request: JevRequest, catalog: JevModelCatalog): List<JevIssue> =

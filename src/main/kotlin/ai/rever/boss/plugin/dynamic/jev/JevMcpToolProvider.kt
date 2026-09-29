@@ -82,7 +82,8 @@ class JevMcpToolProvider(
 
     internal suspend fun validate(args: McpToolArgs): McpToolResult = guarded {
         val request = parse(args)
-        service.catalog.ensure(request.model, request.providerId)
+        // Local and free, so it loads the catalog as jev_decide would.
+        service.catalog.ensure(request.model, request.providerId, request.preferredProviderId)
         val issues = JevValidation.requestIssues(request, service.limits, service.catalog)
         McpToolResult(buildJsonObject {
             put("valid", issues.isEmpty())
@@ -203,7 +204,7 @@ class JevMcpToolProvider(
     internal suspend fun draftGet(args: McpToolArgs): McpToolResult = guarded {
         val vm = playground()
         objectArgs(args, emptySet())
-        McpToolResult(draftJson(vm, vm.state.value).toString())
+        McpToolResult(draftJson(vm, vm.loadCatalog()).toString())
     }
 
     internal suspend fun draftSet(args: McpToolArgs): McpToolResult = guarded {
@@ -245,9 +246,8 @@ class JevMcpToolProvider(
         }.orEmpty()
         val model = root["model"]?.let { stringArg(it, "model") }
         val provider = root["provider"]?.let { stringArg(it, "provider") }
-        if (model != null || provider != null) {
-            service.catalog.ensure(model ?: vm.state.value.model, provider ?: if (model == null) vm.state.value.providerId else null)
-        }
+        // Always: the returned issues must not depend on catalog warmth.
+        service.catalog.ensure(model ?: vm.state.value.model, provider ?: if (model == null) vm.state.value.providerId else null)
         val change = JevDraftChange(
             contextText = contextText,
             sendAsText = sendAsText,
@@ -436,15 +436,14 @@ class JevMcpToolProvider(
         }
         val model = root["model"]?.let { stringArg(it, "model") }
         val provider = root["provider"]?.let { stringArg(it, "provider") }
-        // An explicit model keeps the preset's provider only when that provider serves it.
-        val presetProvider = preset?.providerId?.takeIf { p ->
-            model == null || model == preset.model ||
-                service.catalog.options.value.any { it.id == model && it.providerId.equals(p, ignoreCase = true) }
-        }
+        // The preset's provider is bound to its own model. For another explicit model it is only a
+        // preference, resolved after the catalog loads: deciding here would depend on its warmth.
+        val ownModel = model == null || model == preset?.model
         return JevRequest(
             state, questions, timeout,
             model = model ?: preset?.model ?: JevModelCatalog.DEFAULT.id,
-            providerId = provider ?: presetProvider,
+            providerId = provider ?: preset?.providerId?.takeIf { ownModel },
+            preferredProviderId = preset?.providerId?.takeIf { provider == null && !ownModel },
         )
     }
 

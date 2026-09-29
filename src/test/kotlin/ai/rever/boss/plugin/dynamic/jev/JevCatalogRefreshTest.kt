@@ -2,7 +2,10 @@ package ai.rever.boss.plugin.dynamic.jev
 
 import ai.rever.boss.plugin.api.AiDecisionModel
 import ai.rever.boss.plugin.api.AiDecisionProvider
+import ai.rever.boss.plugin.api.ApplicationEvent
+import ai.rever.boss.plugin.api.ApplicationEventBus
 import ai.rever.boss.plugin.api.McpToolArgs
+import ai.rever.boss.plugin.api.McpToolResult
 import ai.rever.boss.plugin.api.PanelRegistry
 import ai.rever.boss.plugin.api.PluginContext
 import ai.rever.boss.plugin.api.TabRegistry
@@ -10,6 +13,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -19,6 +23,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -26,6 +32,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -39,6 +46,19 @@ class JevCatalogRefreshTest {
         override val panelRegistry = PanelRegistry()
         override val tabRegistry = TabRegistry()
         override val pluginScope = CoroutineScope(SupervisorJob())
+    }
+
+    /** A host whose AI Providers action succeeds. */
+    private fun hostContext() = object : PluginContext {
+        override val panelRegistry = PanelRegistry()
+        override val tabRegistry = TabRegistry()
+        override val pluginScope = CoroutineScope(SupervisorJob())
+        override val windowId: String? get() = "w1"
+        override val applicationEventBus: ApplicationEventBus? get() = object : ApplicationEventBus {
+            override fun events(): Flow<ApplicationEvent> = emptyFlow()
+            override fun <T : ApplicationEvent> eventsOfType(type: Class<T>): Flow<T> = emptyFlow()
+            override fun publish(event: ApplicationEvent) {}
+        }
     }
 
     private fun JevPlaygroundViewModel.awaitCatalog() = runBlocking { catalogRefresh?.join() }
@@ -147,7 +167,7 @@ class JevCatalogRefreshTest {
     @Test
     fun `returning to the panel after opening AI Providers refreshes once`() {
         val api = FakeDecisionApi(listOf(openRouter(reachable = false), localRuntime()))
-        val services = JevPluginServices(context(), CapturingBackend(), decisionApiOverride = { api })
+        val services = JevPluginServices(hostContext(), CapturingBackend(), decisionApiOverride = { api })
         val vm = services.playground
         runBlocking { services.catalog.refresh() }
         val before = api.listings
@@ -257,5 +277,95 @@ class JevCatalogRefreshTest {
         // An explicit provider still wins.
         assertEquals("OTHER", call("""{"preset":"p","state":"x","model":"laya:en","provider":"OTHER"}""")["provider"]!!.jsonPrimitive.content)
         assertEquals(listOf("LOCAL_SYSTEMONE", "OPENROUTER", "OTHER"), sent.providers)
+    }
+
+    // ---- resolution does not depend on catalog warmth ----
+
+    private val localWithJev = localRuntime(true, "laya:en", "laya:multilingual", "typesafe/jev-1.13")
+
+    private suspend fun presetRepo(providerId: String = "LOCAL_SYSTEMONE"): JevPresetRepository {
+        val values = mutableMapOf<String, String>()
+        return JevPresetRepository(object : JevPresetBackend {
+            override suspend fun get(key: String) = values[key]
+            override suspend fun put(key: String, value: String) { values[key] = value }
+            override suspend fun remove(key: String) { values.remove(key) }
+        }).also {
+            it.save(JevPreset("p", "", requestAllTypes().questions.toString(), stateAsJson = false, model = "laya:multilingual", providerId = providerId))
+        }
+    }
+
+    /** A fresh gateway, catalog and MCP provider; [warm] refreshes the catalog first. */
+    private suspend fun mcpOver(providers: List<AiDecisionProvider>, warm: Boolean): Pair<FakeDecisionApi, JevMcpToolProvider> {
+        val api = FakeDecisionApi(providers)
+        val catalog = JevModelCatalog { api }
+        if (warm) catalog.refresh()
+        val service = JevDecisionService(GatewayJevDecisionBackend { api }, catalog)
+        return api to JevMcpToolProvider("p", service, presetRepo())
+    }
+
+    private fun McpToolResult.json() = testJson.parseToJsonElement(text).jsonObject
+
+    @Test
+    fun `a cold catalog keeps the preset's local provider for an explicit model it serves`() = runTest {
+        val raw = """{"preset":"p","state":"PHI","model":"typesafe/jev-1.13"}"""
+        val results = listOf(false, true).map { warm ->
+            val (api, mcp) = mcpOver(listOf(openRouter(), localWithJev), warm)
+            val result = mcp.call(McpToolArgs(emptyMap(), raw))
+            assertFalse(result.isError, result.text)
+            assertEquals(listOf("LOCAL_SYSTEMONE"), api.requests.map { it.providerId }, "warm=$warm")
+            result.json()["provider"]!!.jsonPrimitive.content
+        }
+        assertEquals(listOf("LOCAL_SYSTEMONE", "LOCAL_SYSTEMONE"), results)
+    }
+
+    @Test
+    fun `an id two providers serve is ambiguous whether the catalog is cold or warm`() = runTest {
+        val raw = """{"state":"PHI","questions":${requestAllTypes().questions},"model":"typesafe/jev-1.13"}"""
+        val outcomes = listOf(false, true).map { warm ->
+            val (api, mcp) = mcpOver(listOf(openRouter(), localWithJev), warm)
+            val decided = mcp.call(McpToolArgs(emptyMap(), raw))
+            assertTrue(decided.isError, decided.text)
+            assertTrue(api.requests.isEmpty(), "warm=$warm")
+            val (_, fresh) = mcpOver(listOf(openRouter(), localWithJev), warm)
+            val validated = fresh.validate(McpToolArgs(emptyMap(), raw)).json()
+            decided.json()["error"]!!.jsonObject.let { it["code"]!!.jsonPrimitive.content to it["path"]!!.jsonPrimitive.content } to
+                validated["issues"]!!.jsonArray.map { it.jsonObject["path"]!!.jsonPrimitive.content }
+        }
+        assertEquals(("INVALID_INPUT" to "provider") to listOf("provider"), outcomes[0])
+        assertEquals(outcomes[0], outcomes[1])
+    }
+
+    @Test
+    fun `a preset's local provider that is down is never swapped for OpenRouter`() = runTest {
+        val (api, mcp) = mcpOver(listOf(openRouter(), localRuntime(reachable = false)), warm = false)
+        mcp.call(McpToolArgs(emptyMap(), """{"preset":"p","state":"PHI","model":"typesafe/jev-1.13"}"""))
+        assertEquals(listOf("LOCAL_SYSTEMONE"), api.requests.map { it.providerId })
+    }
+
+    @Test
+    fun `jev_decide and jev_validate report the same first issue`() = runTest {
+        val (api, mcp) = mcpOver(listOf(openRouter(), localWithJev), warm = false)
+        // A model issue and a body issue at once.
+        val raw = """{"state":"x","questions":{"a":{"type":"noul","instructions":""}},"model":"nope"}"""
+        val decided = mcp.call(McpToolArgs(emptyMap(), raw)).json()["error"]!!.jsonObject["path"]!!.jsonPrimitive.content
+        val validated = mcp.validate(McpToolArgs(emptyMap(), raw)).json()["issues"]!!.jsonArray.map { it.jsonObject["path"]!!.jsonPrimitive.content }
+        assertEquals("questions.a.instructions", decided)
+        assertEquals(listOf("questions.a.instructions", "model"), validated)
+        assertTrue(api.requests.isEmpty())
+    }
+
+    @Test
+    fun `the panel draft over MCP resolves against a loaded catalog, never the cold default`() {
+        val api = FakeDecisionApi(listOf(openRouter(), localWithJev))
+        val services = JevPluginServices(context(), decisionApiOverride = { api })
+        val vm = services.playground
+        vm.useAllTypes()
+        val mcp = JevMcpToolProvider("p", services.service, services.presets, { vm })
+        // Cold, the default id looked OpenRouter-only; loaded, it is served by two providers.
+        val draft = runBlocking { mcp.draftGet(McpToolArgs(emptyMap(), "{}")) }.json()
+        assertEquals(listOf("provider"), draft["issues"]!!.jsonArray.map { it.jsonObject["path"]!!.jsonPrimitive.content })
+        assertTrue(runBlocking { mcp.draftRun(McpToolArgs(emptyMap(), "{}")) }.isError)
+        assertTrue(api.requests.isEmpty())
+        services.dispose()
     }
 }
