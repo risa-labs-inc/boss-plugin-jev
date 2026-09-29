@@ -26,7 +26,7 @@ internal object JevValidation {
         val provider = try {
             catalog.resolveChange(request.current, request.model, request.providerId)
         } catch (refused: JevFailure) {
-            // Cold and unpinned: nothing is stored or sent until it resolves on the loaded catalog.
+            // Cold and unbound: nothing is stored or sent until it resolves on the loaded catalog.
             if (catalog.refreshed || request.current != null) return listOf(JevIssue(listOfNotNull(refused.path), refused.message))
             null
         }

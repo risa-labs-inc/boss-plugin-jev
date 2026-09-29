@@ -458,7 +458,7 @@ class JevMcpToolProvider(
         }
         val model = root["model"]?.let { stringArg(it, "model") }
         val provider = root["provider"]?.let { stringArg(it, "provider") }
-        // The preset's binding pins the model; the service resolves it once the catalog has loaded.
+        // The service resolves against the preset's binding once the catalog has loaded.
         return JevRequest(
             state, questions, timeout,
             model = model ?: preset?.model ?: JevModelCatalog.DEFAULT.id,
@@ -502,7 +502,7 @@ class JevMcpToolProvider(
               "mode":{"type":"string","enum":["replace","merge"],"default":"replace","description":"replace swaps all questions; merge upserts by ID"},
               "remove_questions":{"type":"array","items":{"type":"string"},"description":"Question IDs to delete"},
               "model":{"type":"string","description":"Decision model id from jev_models; defaults to ${JevModelCatalog.DEFAULT.id} on OpenRouter"},
-              "provider":{"type":"string","description":"Provider id from jev_models, such as OPENROUTER; required to leave the preset's or draft's provider, or when two providers serve the model id"},
+              "provider":{"type":"string","description":"Provider id from jev_models, such as OPENROUTER; required when two providers serve the model id and the preset's or draft's provider is not one of them; otherwise inferred from the model"},
               "timeout_ms":{"type":"integer","minimum":1000,"maximum":120000}
             }}
         """.trimIndent()
@@ -512,7 +512,7 @@ class JevMcpToolProvider(
               "name":{"type":"string","minLength":1,"maxLength":80},
               "questions":{"type":"object","description":"Save these questions instead of the panel draft; no context is stored"},
               "model":{"type":"string","description":"Decision model id from jev_models; defaults to ${JevModelCatalog.DEFAULT.id} on OpenRouter"},
-              "provider":{"type":"string","description":"Provider id from jev_models, such as OPENROUTER; required to leave the preset's or draft's provider, or when two providers serve the model id"},
+              "provider":{"type":"string","description":"Provider id from jev_models, such as OPENROUTER; required when two providers serve the model id and the preset's or draft's provider is not one of them; otherwise inferred from the model"},
               "timeout_ms":{"type":"integer","minimum":1000,"maximum":120000}
             }}
         """.trimIndent()
@@ -522,7 +522,7 @@ class JevMcpToolProvider(
               "state":{"description":"Decision context as a string, object, or array","oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},
               "preset":{"type":"string","description":"Name of a rubric saved in the Jev panel; use instead of questions"},
               "model":{"type":"string","description":"Decision model id from jev_models; defaults to ${JevModelCatalog.DEFAULT.id} on OpenRouter"},
-              "provider":{"type":"string","description":"Provider id from jev_models, such as OPENROUTER; required to leave the preset's or draft's provider, or when two providers serve the model id"},
+              "provider":{"type":"string","description":"Provider id from jev_models, such as OPENROUTER; required when two providers serve the model id and the preset's or draft's provider is not one of them; otherwise inferred from the model"},
               "questions":{"type":"object","minProperties":1,"maxProperties":32,"additionalProperties":{"oneOf":[
                 {"type":"object","additionalProperties":false,"properties":{"type":{"const":"noul"},"instructions":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},"criteria":{"type":"object","additionalProperties":false,"properties":{"true":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},"false":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]}}}},"required":["type","instructions"]},
                 {"type":"object","additionalProperties":false,"properties":{"type":{"const":"choice"},"instructions":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},"criteria":{"type":"object","minProperties":1,"maxProperties":255,"additionalProperties":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"},{"type":"null"}]}}},"required":["type","instructions","criteria"]},

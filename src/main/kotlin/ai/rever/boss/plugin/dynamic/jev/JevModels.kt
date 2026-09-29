@@ -11,7 +11,7 @@ data class JevRequest(
     val model: String = JevModelCatalog.DEFAULT.id,
     /** Explicit; null resolves [model] through [JevModelCatalog.resolveChange]. */
     val providerId: String? = null,
-    /** The preset's model and provider; they pin a [model] given without [providerId]. */
+    /** The preset's model and provider; the preset's own [model] keeps that provider. */
     val current: JevBinding? = null,
 )
 

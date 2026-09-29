@@ -45,7 +45,7 @@ data class JevPlaygroundState(
     val jsonOnly: Boolean = false,
     val timeoutMs: Long = JevLimits.DEFAULT_TIMEOUT_MS,
     val model: String = JevModelCatalog.DEFAULT.id,
-    /** Null only for the untouched default model, which pins nothing; set by [JevModelCatalog.resolveChange]. */
+    /** Null only for the untouched default model; set by [JevModelCatalog.resolveChange]. */
     val providerId: String? = null,
     /** The catalog entry [model] resolves to, or null while it does not. */
     val modelOption: JevModelOption? = null,
@@ -72,7 +72,7 @@ data class JevPlaygroundState(
 ) {
     fun issue(field: JevField): String? = issues.firstOrNull { it.field == field }?.message
 
-    /** The chosen model and its provider, which pin any other model; null for the untouched default. */
+    /** The chosen model and its provider; null for the untouched default. */
     val binding: JevBinding? get() = providerId?.let { JevBinding(model, it) }
 
     /** The questions as the API shape, or null while the JSON editor does not parse. */

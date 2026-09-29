@@ -297,7 +297,7 @@ class JevCatalogRefreshTest {
     // ---- MCP ----
 
     @Test
-    fun `an explicit model keeps the preset's provider, and fails when that provider does not serve it`() = runTest {
+    fun `an explicit model keeps the preset's provider when it serves it, and moves to the one that serves it otherwise`() = runTest {
         val twin = AiDecisionProvider("OTHER", "Other", local = false, reachable = true, models = listOf(AiDecisionModel("laya:en")))
         val api = FakeDecisionApi(listOf(openRouter(), localRuntime(), twin))
         val catalog = JevModelCatalog { api }.also { it.refresh() }
@@ -314,13 +314,11 @@ class JevCatalogRefreshTest {
 
         // laya:en is on LOCAL_SYSTEMONE and OTHER; the preset's provider settles it.
         assertEquals("LOCAL_SYSTEMONE", call("""{"preset":"p","state":"x","model":"laya:en"}""")["provider"]!!.jsonPrimitive.content)
-        // The preset's provider does not serve jev-1.13; the request fails rather than re-route.
-        val pinned = call("""{"preset":"p","state":"x","model":"typesafe/jev-1.13"}""")["error"]!!.jsonObject
-        assertEquals("INVALID_INPUT", pinned["code"]!!.jsonPrimitive.content)
-        assertEquals("provider", pinned["path"]!!.jsonPrimitive.content)
+        // Only OpenRouter serves jev-1.13, so the call moves there.
+        assertEquals("OPENROUTER", call("""{"preset":"p","state":"x","model":"typesafe/jev-1.13"}""")["provider"]!!.jsonPrimitive.content)
         // An explicit provider still wins.
         assertEquals("OTHER", call("""{"preset":"p","state":"x","model":"laya:en","provider":"OTHER"}""")["provider"]!!.jsonPrimitive.content)
-        assertEquals(listOf("LOCAL_SYSTEMONE", "OTHER"), sent.providers)
+        assertEquals(listOf("LOCAL_SYSTEMONE", "OPENROUTER", "OTHER"), sent.providers)
     }
 
     // ---- resolution does not depend on catalog warmth ----
@@ -380,11 +378,11 @@ class JevCatalogRefreshTest {
     }
 
     @Test
-    fun `a preset's local provider that is down is never swapped for OpenRouter`() = runTest {
+    fun `an OpenRouter model moves a preset off its local provider, which is down`() = runTest {
         val (api, mcp) = mcpOver(listOf(openRouter(), localRuntime(reachable = false)), warm = false)
-        val error = mcp.call(McpToolArgs(emptyMap(), """{"preset":"p","state":"PHI","model":"typesafe/jev-1.13"}""")).json()["error"]!!.jsonObject
-        assertEquals("provider", error["path"]!!.jsonPrimitive.content)
-        assertTrue(api.requests.isEmpty())
+        val result = mcp.call(McpToolArgs(emptyMap(), """{"preset":"p","state":"PHI","model":"typesafe/jev-1.13"}"""))
+        assertFalse(result.isError, result.text)
+        assertEquals(listOf("OPENROUTER"), api.requests.map { it.providerId })
     }
 
     @Test

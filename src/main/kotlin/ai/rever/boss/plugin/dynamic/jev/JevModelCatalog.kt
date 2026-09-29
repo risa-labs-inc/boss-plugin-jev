@@ -158,9 +158,10 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
 
     /**
      * The one provider rule: the provider a model change goes to, or INVALID_INPUT. An explicit
-     * [providerId] wins. Otherwise [current]'s provider is kept, and must list [model] in the
-     * loaded catalog; with no [current], [model] must resolve uniquely in the loaded catalog.
-     * A provider is never picked from a cold catalog, and never switched without being named.
+     * [providerId] wins. [current]'s own model keeps its provider. Any other model goes to the
+     * provider that serves it in the loaded catalog, even when that leaves [current]'s provider;
+     * an id several providers serve keeps [current]'s provider only when it is one of them.
+     * A provider is never picked from a cold catalog.
      */
     fun resolveChange(current: JevBinding?, model: String, providerId: String?, loaded: Boolean = refreshed): String {
         if (providerId != null) {
@@ -172,27 +173,16 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
                 is JevModelLookup.Ambiguous -> refuse("provider", ambiguous(found))
             }
         }
-        if (current == null) {
-            if (!loaded) refuse("model", "The model catalog did not load in time, so '$model' cannot be resolved to a provider; pass provider or retry")
-            return when (val found = lookup(model, null)) {
-                is JevModelLookup.Found -> found.option.providerId
-                is JevModelLookup.Unknown -> refuse(found.path, found.message)
-                is JevModelLookup.Ambiguous -> refuse("provider", ambiguous(found))
+        if (current != null && model == current.model) return current.providerId ?: resolveChange(null, model, null, loaded)
+        if (!loaded) refuse("model", "The model catalog did not load in time, so '$model' cannot be resolved to a provider; pass provider or retry")
+        return when (val found = lookup(model, null)) {
+            is JevModelLookup.Found -> found.option.providerId
+            is JevModelLookup.Unknown -> refuse(found.path, found.message)
+            is JevModelLookup.Ambiguous -> {
+                val kept = current?.let { it.providerId ?: runCatching { resolveChange(null, it.model, null, loaded) }.getOrNull() }
+                found.providers.firstOrNull { it.equals(kept, ignoreCase = true) } ?: refuse("provider", ambiguous(found))
             }
         }
-        val pin = current.providerId ?: resolveChange(null, current.model, null, loaded)
-        if (model == current.model) return pin
-        _options.value.firstOrNull { it.id == model && it.providerId.equals(pin, ignoreCase = true) }
-            ?.takeIf { loaded }
-            ?.let { return it.providerId }
-        val status = providerStatus(pin)
-        val name = status?.let { "${it.label} ($pin)" } ?: pin
-        val why = when {
-            !loaded -> "the model catalog has not loaded, so $name cannot confirm '$model'; pass provider or retry"
-            status != null && !status.reachable -> "$name is not reachable, so it cannot confirm '$model'; pass provider to use another provider"
-            else -> "$name does not serve '$model'; pass provider to use another provider"
-        }
-        refuse("provider", "This is pinned to $name, and $why")
     }
 
     fun find(model: String, providerId: String?): JevModelOption? =

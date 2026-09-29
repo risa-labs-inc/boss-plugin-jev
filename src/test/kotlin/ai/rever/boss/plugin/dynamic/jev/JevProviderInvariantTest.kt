@@ -33,8 +33,9 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
- * One rule decides every provider: an explicit provider wins, a bound provider is kept, and
- * nothing is resolved on a cold catalog. A call never moves between OpenRouter and local unnamed.
+ * One rule decides every provider: an explicit provider wins, a model goes to the provider that
+ * serves it, a shared id keeps the current provider, and nothing resolves on a cold catalog.
+ * Each call goes to exactly the resolved provider, with no fallback.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class JevProviderInvariantTest {
@@ -74,19 +75,18 @@ class JevProviderInvariantTest {
     // ---- review scenarios ----
 
     @Test
-    fun `a model change while the catalog cannot load is refused, and nothing reaches OpenRouter`() {
+    fun `a model change moves the draft when the catalog is loaded, and is refused while it cannot load`() {
         for (warm in listOf(true, false)) {
             val d = Panel(listOf(openRouter(), localRuntime(true, "laya:en")))
             if (warm) runBlocking { d.services.catalog.refresh() } else d.api.gate = CompletableDeferred()
             val first = d.call { draftSet(McpToolArgs(emptyMap(), """{"state":"PHI patient","questions":$q,"model":"laya:en","timeout_ms":1000}""")) }
             val second = d.call { draftSet(McpToolArgs(emptyMap(), """{"model":"$JEV","timeout_ms":1000}""")) }
-            assertTrue(second.isError, "warm=$warm: ${second.text}")
-            assertEquals("INVALID_INPUT", second.code())
             if (warm) {
                 assertFalse(first.isError, first.text)
-                assertEquals("provider", second.path())
-                assertEquals("laya:en" to LOCAL, d.vm.state.value.model to d.vm.state.value.providerId)
+                assertFalse(second.isError, second.text)
+                assertEquals(JEV to OPENROUTER, d.vm.state.value.model to d.vm.state.value.providerId)
             } else {
+                assertEquals("INVALID_INPUT", second.code(), second.text)
                 assertEquals("INVALID_INPUT" to "model", first.code() to first.path(), first.text)
                 assertTrue(first.error()!!["message"]!!.jsonPrimitive.content.contains("pass provider or retry"))
                 // Refused whole: no PHI context, no model, no provider was stored.
@@ -95,13 +95,13 @@ class JevProviderInvariantTest {
             }
             d.api.gate?.complete(Unit)
             d.call { draftRun(McpToolArgs(emptyMap(), "{}")) }
-            if (warm) assertEquals(listOf(LOCAL), d.sent) else assertTrue(d.api.requests.none { it.body.contains("PHI") })
+            if (warm) assertEquals(listOf(OPENROUTER), d.sent) else assertTrue(d.api.requests.none { it.body.contains("PHI") })
             d.services.dispose()
         }
     }
 
     @Test
-    fun `a preset saved without a provider resolves it on use and pins it`() {
+    fun `a preset saved without a provider resolves it on use and stores it`() {
         val d = Panel(listOf(openRouter(), localRuntime(false)))
         // Down: laya:en resolves nowhere, so the draft refuses it rather than store no provider.
         val set = d.call { draftSet(McpToolArgs(emptyMap(), """{"state":"PHI patient","questions":$q,"model":"laya:en"}""")) }
@@ -122,16 +122,17 @@ class JevProviderInvariantTest {
         val own = d.call { call(McpToolArgs(emptyMap(), """{"preset":"legacy","state":"PHI patient"}""")) }
         assertFalse(own.isError, own.text)
         val other = d.call { call(McpToolArgs(emptyMap(), """{"preset":"legacy","state":"PHI patient","model":"$JEV"}""")) }
-        assertEquals("INVALID_INPUT" to "provider", other.code() to other.path(), other.text)
-        assertEquals(listOf(LOCAL), d.sent)
+        assertFalse(other.isError, other.text)
+        assertEquals(listOf(LOCAL, OPENROUTER), d.sent)
 
-        // Opened in the panel, it stores the resolved provider, which pins the next model.
+        // Opened in the panel, it stores the resolved provider; the next model moves it.
         runBlocking { d.vm.loadPreset("legacy")!!.join() }
         assertEquals("laya:en" to LOCAL, d.vm.state.value.model to d.vm.state.value.providerId)
         val moved = d.call { draftSet(McpToolArgs(emptyMap(), """{"model":"$JEV"}""")) }
-        assertEquals("provider", moved.path(), moved.text)
+        assertFalse(moved.isError, moved.text)
+        assertEquals(OPENROUTER, d.vm.state.value.providerId)
         d.call { draftRun(McpToolArgs(emptyMap(), "{}")) }
-        assertEquals(listOf(LOCAL, LOCAL), d.sent)
+        assertEquals(listOf(LOCAL, OPENROUTER, OPENROUTER), d.sent)
         d.services.dispose()
     }
 
@@ -230,17 +231,19 @@ class JevProviderInvariantTest {
             val down = e == LOCAL && case.local == Local.DOWN
             return e.takeIf { case.model in listed.getValue(e) || down }
         }
-        fun unique(model: String) = listed.filterValues { model in it }.keys.singleOrNull()
-        val pin = when {
-            case.current == Current.NONE -> return unique(case.model)
-            case.current.stored -> case.current.provider!!
-            else -> unique(case.current.model!!) ?: return null
+        fun servers(model: String) = listed.filterValues { model in it }.keys
+        servers(case.model).singleOrNull()?.let { return it }
+        val kept = when {
+            case.current == Current.NONE -> null
+            case.current.stored -> case.current.provider
+            else -> servers(case.current.model!!).singleOrNull()
         }
-        return pin.takeIf { case.model in listed.getValue(pin) }
+        // Shared: kept only when the current provider serves it. Unlisted: refused.
+        return kept?.takeIf { it in servers(case.model) }
     }
 
     @Test
-    fun `a panel draft's model change stays on its provider, takes an explicit one, or is refused`() = runBlocking {
+    fun `a panel draft's model change moves to its provider, takes an explicit one, or is refused`() = runBlocking {
         val all = cases(listOf(Current.NONE, Current.OPENROUTER_STORED, Current.LOCAL_STORED))
         val failures = all.map { case -> async { draftCase(case) } }.awaitAll().filterNotNull()
         assertTrue(failures.isEmpty(), "${failures.size} of ${all.size} cases:\n" + failures.joinToString("\n"))
@@ -269,7 +272,7 @@ class JevProviderInvariantTest {
             if (problem != null) return "$case: $problem"
             d.api.gate?.complete(Unit)
             d.mcp.draftRun(McpToolArgs(emptyMap(), "{}"))
-            // The untouched default is the only unpinned run, and it defaults to OpenRouter.
+            // The untouched default is the only unbound run, and it defaults to OpenRouter.
             val allowed = after ?: OPENROUTER
             if (d.sent.any { it != allowed }) return "$case: ran on ${d.sent}, bound to $allowed"
             return null
@@ -280,7 +283,7 @@ class JevProviderInvariantTest {
     }
 
     @Test
-    fun `jev_decide with a preset stays on its provider, takes an explicit one, or is refused`() = runBlocking {
+    fun `jev_decide with a preset moves to the model's provider, takes an explicit one, or is refused`() = runBlocking {
         val all = cases(Current.entries)
         val failures = all.map { case -> async { decideCase(case) } }.awaitAll().filterNotNull()
         assertTrue(failures.isEmpty(), "${failures.size} of ${all.size} cases:\n" + failures.joinToString("\n"))
@@ -320,24 +323,32 @@ class JevProviderInvariantTest {
     }
 
     @Test
-    fun `local-pinned state never reaches OpenRouter, and OpenRouter-pinned state never reaches local`() = runBlocking {
-        for ((pinned, other) in listOf(LOCAL to OPENROUTER, OPENROUTER to LOCAL)) {
-            val model = if (pinned == LOCAL) "laya:en" else JEV
-            for (local in Local.entries) for (target in requested + listOf(JEV, "laya:en")) {
-                val d = Panel(providers(local))
-                d.vm.applyDraft(JevDraftChange(contextText = "PHI patient", questions = q))
-                d.vm.setModel(model, pinned)
-                d.mcp.draftSet(McpToolArgs(emptyMap(), """{"model":"$target"}"""))
-                d.vm.setModel(target, null)
-                runCatching { d.vm.applyDraft(JevDraftChange(model = target)) }
-                d.mcp.presetSave(McpToolArgs(emptyMap(), """{"name":"x","model":"$target"}"""))
-                d.mcp.draftRun(McpToolArgs(emptyMap(), "{}"))
-                d.mcp.call(McpToolArgs(emptyMap(), """{"preset":"x","state":"PHI patient","model":"$target"}"""))
-                d.mcp.call(McpToolArgs(emptyMap(), """{"preset":"x","state":"PHI patient"}"""))
-                assertFalse(other in d.sent, "pinned=$pinned local=$local target=$target sent=${d.sent}")
-                assertEquals(pinned, d.vm.state.value.providerId)
-                d.services.dispose()
-            }
+    fun `a draft moves between local and OpenRouter in both directions, and a failure is never retried elsewhere`() = runBlocking {
+        for ((from, to) in listOf(LOCAL to OPENROUTER, OPENROUTER to LOCAL)) {
+            val start = if (from == LOCAL) "laya:en" else JEV
+            val target = if (to == LOCAL) "laya:en" else JEV
+            val d = Panel(providers(Local.UP))
+            d.services.catalog.refresh()
+            d.vm.applyDraft(JevDraftChange(contextText = "PHI patient", questions = q))
+            d.vm.setModel(start, from)
+            // The picker path: an explicit provider.
+            d.vm.setModel(target, to)
+            assertEquals(target to to, d.vm.state.value.model to d.vm.state.value.providerId)
+            d.vm.setModel(start, from)
+            // Any path without a provider: the model's own.
+            d.vm.setModel(target, null)
+            assertEquals(to, d.vm.state.value.providerId)
+            assertEquals(to, d.vm.state.value.modelOption?.providerId)
+            assertFalse(d.mcp.draftSet(McpToolArgs(emptyMap(), """{"model":"$start"}""")).isError)
+            assertEquals(from, d.vm.state.value.providerId)
+            d.mcp.draftSet(McpToolArgs(emptyMap(), """{"model":"$target"}"""))
+            // A shared id keeps whichever provider the draft is on.
+            d.mcp.draftSet(McpToolArgs(emptyMap(), """{"model":"$SHARED"}"""))
+            assertEquals(to, d.vm.state.value.providerId)
+            d.api.reply = { Result.failure(RuntimeException("down")) }
+            assertTrue(d.mcp.draftRun(McpToolArgs(emptyMap(), "{}")).isError)
+            assertEquals(listOf(to), d.sent, "from=$from to=$to")
+            d.services.dispose()
         }
     }
 
@@ -345,20 +356,35 @@ class JevProviderInvariantTest {
     fun `resolveChange is the only rule, and it refuses on a cold catalog`() {
         val catalog = JevModelCatalog { FakeDecisionApi(providers(Local.UP)) }
         val bound = JevBinding("laya:en", LOCAL)
+        val external = JevBinding(JEV, OPENROUTER)
         fun refused(block: () -> String) = runCatching(block).exceptionOrNull() as JevFailure
-        // Cold: an explicit provider is taken as named; nothing else resolves.
+        // Cold: an explicit provider is taken as named, and a binding keeps its own model; nothing else resolves.
         assertEquals(LOCAL, catalog.resolveChange(null, LOCAL_ALT, LOCAL))
         assertEquals("model", refused { catalog.resolveChange(null, JEV, null) }.path)
-        assertEquals("provider", refused { catalog.resolveChange(bound, LOCAL_ALT, null) }.path)
+        refused { catalog.resolveChange(bound, JEV, null) }.let { assertEquals("model", it.path); assertTrue(it.message.contains("pass provider or retry")) }
+        assertEquals("model", refused { catalog.resolveChange(external, "laya:en", null) }.path)
         assertEquals(LOCAL, catalog.resolveChange(bound, "laya:en", null))
         runBlocking { catalog.refresh() }
         assertEquals(LOCAL, catalog.resolveChange(bound, LOCAL_ALT, null))
+        // A unique id moves the binding, in either direction.
+        assertEquals(OPENROUTER, catalog.resolveChange(bound, JEV, null))
+        assertEquals(OPENROUTER, catalog.resolveChange(bound, OR_ALT, null))
+        assertEquals(LOCAL, catalog.resolveChange(external, "laya:en", null))
+        // A shared id keeps the current provider, or needs one named.
         assertEquals(LOCAL, catalog.resolveChange(bound, SHARED, null))
-        assertEquals("provider", refused { catalog.resolveChange(bound, OR_ALT, null) }.path)
+        assertEquals(OPENROUTER, catalog.resolveChange(external, SHARED, null))
+        refused { catalog.resolveChange(null, SHARED, null) }.let { assertEquals("provider", it.path); assertTrue(it.message.contains(LOCAL) && it.message.contains(OPENROUTER)) }
+        assertEquals("provider", refused { catalog.resolveChange(JevBinding("nope:1", null), SHARED, null) }.path)
+        // An explicit provider wins.
+        assertEquals(OPENROUTER, catalog.resolveChange(bound, SHARED, OPENROUTER))
         assertEquals(OPENROUTER, catalog.resolveChange(bound, OR_ALT, OPENROUTER))
-        assertEquals("provider", refused { catalog.resolveChange(null, SHARED, null) }.path)
-        assertEquals("model", refused { catalog.resolveChange(JevBinding("nope:1", null), "laya:en", null) }.path)
+        assertEquals("model", refused { catalog.resolveChange(bound, OR_ALT, LOCAL) }.path)
+        // Unlisted: refused at model.
+        assertEquals("model", refused { catalog.resolveChange(bound, "nope:1", null) }.path)
+        // A binding saved without a provider resolves the same way.
+        assertEquals(LOCAL, catalog.resolveChange(JevBinding("nope:1", null), "laya:en", null))
         assertEquals(LOCAL, catalog.resolveChange(JevBinding(LOCAL_ALT, null), SHARED, null))
+        assertEquals(OPENROUTER, catalog.resolveChange(JevBinding(LOCAL_ALT, null), JEV, null))
     }
 
     private companion object {
