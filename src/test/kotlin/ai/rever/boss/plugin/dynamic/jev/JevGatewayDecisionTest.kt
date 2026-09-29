@@ -12,6 +12,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -63,6 +64,15 @@ class JevGatewayDecisionTest {
         val failure = assertFailsWith<JevFailure> { GatewayJevDecisionBackend { odd }.decide(JevModelCatalog.DEFAULT, "{}", 1_000, 1_000) }
         assertEquals("UPSTREAM_ERROR", failure.code)
         assertEquals("OpenRouter could not complete the request", failure.message)
+    }
+
+    @Test
+    fun `cancellation from the gateway is rethrown, never mapped to a failure`() = runTest {
+        val returned = FakeDecisionApi(reply = { Result.failure(CancellationException("stop")) })
+        assertFailsWith<CancellationException> { GatewayJevDecisionBackend { returned }.decide(JevModelCatalog.DEFAULT, "{}", 1_000, 1_000) }
+
+        val thrown = FakeDecisionApi(reply = { throw CancellationException("stop") })
+        assertFailsWith<CancellationException> { GatewayJevDecisionBackend { thrown }.decide(JevModelCatalog.DEFAULT, "{}", 1_000, 1_000) }
     }
 
     @Test
