@@ -5,6 +5,7 @@ import ai.rever.boss.plugin.api.AiDecisionModel
 import ai.rever.boss.plugin.api.AiDecisionProvider
 import ai.rever.boss.plugin.api.AiDecisionReply
 import ai.rever.boss.plugin.api.AiDecisionRequest
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 
@@ -55,9 +56,11 @@ internal class FakeDecisionApi(
     var reply: (AiDecisionRequest) -> Result<AiDecisionReply> = { Result.success(AiDecisionReply(validResponse, it.providerId, 1)) },
 ) : AiDecisionAPI {
     val requests = mutableListOf<AiDecisionRequest>()
-    var listings = 0
+    @Volatile var listings = 0
+    /** When set, listing waits for it, so a test can hold a refresh in flight. */
+    @Volatile var gate: CompletableDeferred<Unit>? = null
 
-    override suspend fun decisionProviders(): List<AiDecisionProvider> { listings++; return providers }
+    override suspend fun decisionProviders(): List<AiDecisionProvider> { listings++; gate?.await(); return providers }
     override suspend fun decide(request: AiDecisionRequest): Result<AiDecisionReply> { requests += request; return reply(request) }
 }
 

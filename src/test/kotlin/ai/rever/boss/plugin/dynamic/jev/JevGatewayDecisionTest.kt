@@ -43,7 +43,7 @@ class JevGatewayDecisionTest {
             AiDecisionException.NETWORK_ERROR to "NETWORK_ERROR",
             AiDecisionException.RESPONSE_TOO_LARGE to "RESPONSE_TOO_LARGE",
             AiDecisionException.UPSTREAM_ERROR to "UPSTREAM_ERROR",
-            AiDecisionException.UNKNOWN_PROVIDER to "UPSTREAM_ERROR",
+            AiDecisionException.UNKNOWN_PROVIDER to "UNKNOWN_PROVIDER",
             "SOMETHING_NEW" to "UPSTREAM_ERROR",
         )
         expected.forEach { (gatewayCode, jevCode) ->
