@@ -82,14 +82,15 @@ class JevMcpToolProvider(
 
     internal suspend fun validate(args: McpToolArgs): McpToolResult = guarded {
         val request = parse(args)
-        // Local and free, so it loads the catalog as jev_decide would.
-        service.catalog.ensure(request.model, request.providerId, request.preferredProviderId)
+        // Loads as jev_decide would, admitted and under the request's deadline.
+        val loaded = service.loadCatalog(request.timeoutMs, request.model, request.providerId, request.pinnedProviderId)
         val issues = JevValidation.requestIssues(request, service.limits, service.catalog)
         McpToolResult(buildJsonObject {
             put("valid", issues.isEmpty())
             put("issues", buildJsonArray {
                 issues.forEach { add(buildJsonObject { put("path", it.pathText); put("message", it.message) }) }
             })
+            if (!loaded) put("note", CATALOG_NOTE)
         }.toString())
     }
 
@@ -204,7 +205,8 @@ class JevMcpToolProvider(
     internal suspend fun draftGet(args: McpToolArgs): McpToolResult = guarded {
         val vm = playground()
         objectArgs(args, emptySet())
-        McpToolResult(draftJson(vm, vm.loadCatalog()).toString())
+        val s = vm.loadCatalog()
+        McpToolResult(draftJson(vm, s, catalogLoaded = service.catalog.refreshed).toString())
     }
 
     internal suspend fun draftSet(args: McpToolArgs): McpToolResult = guarded {
@@ -246,8 +248,14 @@ class JevMcpToolProvider(
         }.orEmpty()
         val model = root["model"]?.let { stringArg(it, "model") }
         val provider = root["provider"]?.let { stringArg(it, "provider") }
-        // Always: the returned issues must not depend on catalog warmth.
-        service.catalog.ensure(model ?: vm.state.value.model, provider ?: if (model == null) vm.state.value.providerId else null)
+        val current = vm.state.value
+        // Always: the returned issues must not depend on catalog warmth. The draft's provider pins another model.
+        val loaded = service.loadCatalog(
+            root["timeout_ms"]?.let { longArg(it, "timeout_ms") } ?: current.timeoutMs,
+            model ?: current.model,
+            provider ?: current.providerId.takeIf { model == null || model == current.model },
+            current.providerId.takeIf { model != null && provider == null && model != current.model },
+        )
         val change = JevDraftChange(
             contextText = contextText,
             sendAsText = sendAsText,
@@ -259,7 +267,7 @@ class JevMcpToolProvider(
             timeoutMs = root["timeout_ms"]?.let { longArg(it, "timeout_ms") },
         )
         val next = vm.applyDraft(change)
-        McpToolResult(draftJson(vm, next).toString())
+        McpToolResult(draftJson(vm, next, catalogLoaded = loaded).toString())
     }
 
     internal suspend fun draftRun(args: McpToolArgs): McpToolResult = guarded {
@@ -285,9 +293,19 @@ class JevMcpToolProvider(
         if (provider != null && model == null) throw JevFailure("INVALID_INPUT", "Pass model with provider", "provider")
         val timeout = root["timeout_ms"]?.let { longArg(it, "timeout_ms") }
         val catalog = service.catalog
+        val draft = vm.state.value
+        // Saving the draft keeps its provider: bound to its own model, a pin for another one.
+        val fromDraft = questions == null && provider == null
+        val bound = provider ?: draft.providerId.takeIf { fromDraft && model == draft.model }
+        val pin = draft.providerId.takeIf { fromDraft && model != null && model != draft.model }
+        // A preset must not be resolved against a cold catalog.
+        if (!service.loadCatalog(timeout ?: draft.timeoutMs, model, bound, pin)) {
+            throw JevFailure("TIMEOUT", "The model catalog did not load in time; try again")
+        }
         if (model != null) {
-            catalog.ensure(model, provider)
-            val request = JevRequest(JsonPrimitive("preset"), questions ?: JsonObject(emptyMap()), model = model, providerId = provider)
+            val request = JevRequest(
+                JsonPrimitive("preset"), questions ?: JsonObject(emptyMap()), model = model, providerId = bound, pinnedProviderId = pin,
+            )
             JevValidation.modelIssues(request, catalog).takeIf { it.isNotEmpty() }?.let { return@guarded issuesError(it) }
         }
         if (questions != null) {
@@ -298,7 +316,7 @@ class JevMcpToolProvider(
             )
             if (issues.isNotEmpty()) return@guarded issuesError(issues)
         }
-        val resolvedProvider = model?.let { catalog.find(it, provider)?.providerId }
+        val resolvedProvider = model?.let { catalog.find(it, bound ?: pin)?.providerId }
         val saved = vm.savePreset(name, questions, model, resolvedProvider, timeout)
         McpToolResult(buildJsonObject {
             put("saved", saved.name)
@@ -325,7 +343,7 @@ class JevMcpToolProvider(
     private fun playground(): JevPlaygroundViewModel =
         playground?.invoke() ?: throw JevFailure("SERVICE_UNAVAILABLE", "The Jev panel draft is unavailable")
 
-    private fun draftJson(vm: JevPlaygroundViewModel, s: JevPlaygroundState): JsonObject = buildJsonObject {
+    private fun draftJson(vm: JevPlaygroundViewModel, s: JevPlaygroundState, catalogLoaded: Boolean = true): JsonObject = buildJsonObject {
         put("title", s.title)
         s.presetName?.let { put("preset", it) }
         put("unsaved_changes", s.dirty)
@@ -346,6 +364,7 @@ class JevMcpToolProvider(
         put("timeout_ms", s.timeoutMs)
         put("valid", s.request != null)
         put("issues", issuesJson(s.apiIssues))
+        if (!catalogLoaded) put("note", CATALOG_NOTE)
         put("running", s.running)
         vm.runs.value.firstOrNull()?.let { run ->
             put("last_run", buildJsonObject {
@@ -436,14 +455,14 @@ class JevMcpToolProvider(
         }
         val model = root["model"]?.let { stringArg(it, "model") }
         val provider = root["provider"]?.let { stringArg(it, "provider") }
-        // The preset's provider is bound to its own model. For another explicit model it is only a
-        // preference, resolved after the catalog loads: deciding here would depend on its warmth.
+        // The preset's provider is bound to its own model and pins any other explicit one; the pin
+        // is checked after the catalog loads, so the outcome does not depend on its warmth.
         val ownModel = model == null || model == preset?.model
         return JevRequest(
             state, questions, timeout,
             model = model ?: preset?.model ?: JevModelCatalog.DEFAULT.id,
             providerId = provider ?: preset?.providerId?.takeIf { ownModel },
-            preferredProviderId = preset?.providerId?.takeIf { provider == null && !ownModel },
+            pinnedProviderId = preset?.providerId?.takeIf { provider == null && !ownModel },
         )
     }
 
@@ -471,6 +490,8 @@ class JevMcpToolProvider(
     )
 
     companion object {
+        private const val CATALOG_NOTE = "The model catalog did not load in time; issues reflect the models known so far"
+
         val DRAFT_SET_SCHEMA = """
             {"type":"object","additionalProperties":false,"properties":{
               "state":{"description":"Decision context: a string is sent as text, an object or array as JSON","oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},

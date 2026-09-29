@@ -12,14 +12,12 @@ data class JevRequest(
     /** Null means infer it from the catalog; the service records the resolved one. */
     val providerId: String? = null,
     /**
-     * Used for [model] when [providerId] is null and the loaded catalog says it serves it, as a
-     * preset's provider is for an explicit model. Resolved only after the catalog has loaded.
+     * The preset's or draft's provider, for an explicit [model] when [providerId] is null. It
+     * must serve [model] in the loaded catalog; a request is never re-routed off it.
      */
-    val preferredProviderId: String? = null,
+    val pinnedProviderId: String? = null,
 ) {
-    /** Only after [JevModelCatalog.ensure]: a cold catalog lists only the default. */
-    fun resolvedWith(catalog: JevModelCatalog): JevRequest =
-        copy(providerId = catalog.providerFor(model, providerId, preferredProviderId), preferredProviderId = null)
+    fun resolved(): JevRequest = copy(providerId = providerId ?: pinnedProviderId, pinnedProviderId = null)
 }
 
 /** A decision model the user can pick. [providerId] names the gateway provider that serves it. */

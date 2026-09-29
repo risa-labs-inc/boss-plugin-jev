@@ -297,7 +297,7 @@ class JevCatalogRefreshTest {
     // ---- MCP ----
 
     @Test
-    fun `an explicit model keeps the preset's provider only when that provider serves it`() = runTest {
+    fun `an explicit model keeps the preset's provider, and fails when that provider does not serve it`() = runTest {
         val twin = AiDecisionProvider("OTHER", "Other", local = false, reachable = true, models = listOf(AiDecisionModel("laya:en")))
         val api = FakeDecisionApi(listOf(openRouter(), localRuntime(), twin))
         val catalog = JevModelCatalog { api }.also { it.refresh() }
@@ -314,11 +314,13 @@ class JevCatalogRefreshTest {
 
         // laya:en is on LOCAL_SYSTEMONE and OTHER; the preset's provider settles it.
         assertEquals("LOCAL_SYSTEMONE", call("""{"preset":"p","state":"x","model":"laya:en"}""")["provider"]!!.jsonPrimitive.content)
-        // The preset's provider does not serve jev-1.13, so the model resolves on its own.
-        assertEquals("OPENROUTER", call("""{"preset":"p","state":"x","model":"typesafe/jev-1.13"}""")["provider"]!!.jsonPrimitive.content)
+        // The preset's provider does not serve jev-1.13; the request fails rather than re-route.
+        val pinned = call("""{"preset":"p","state":"x","model":"typesafe/jev-1.13"}""")["error"]!!.jsonObject
+        assertEquals("INVALID_INPUT", pinned["code"]!!.jsonPrimitive.content)
+        assertEquals("provider", pinned["path"]!!.jsonPrimitive.content)
         // An explicit provider still wins.
         assertEquals("OTHER", call("""{"preset":"p","state":"x","model":"laya:en","provider":"OTHER"}""")["provider"]!!.jsonPrimitive.content)
-        assertEquals(listOf("LOCAL_SYSTEMONE", "OPENROUTER", "OTHER"), sent.providers)
+        assertEquals(listOf("LOCAL_SYSTEMONE", "OTHER"), sent.providers)
     }
 
     // ---- resolution does not depend on catalog warmth ----
@@ -380,8 +382,9 @@ class JevCatalogRefreshTest {
     @Test
     fun `a preset's local provider that is down is never swapped for OpenRouter`() = runTest {
         val (api, mcp) = mcpOver(listOf(openRouter(), localRuntime(reachable = false)), warm = false)
-        mcp.call(McpToolArgs(emptyMap(), """{"preset":"p","state":"PHI","model":"typesafe/jev-1.13"}"""))
-        assertEquals(listOf("LOCAL_SYSTEMONE"), api.requests.map { it.providerId })
+        val error = mcp.call(McpToolArgs(emptyMap(), """{"preset":"p","state":"PHI","model":"typesafe/jev-1.13"}""")).json()["error"]!!.jsonObject
+        assertEquals("provider", error["path"]!!.jsonPrimitive.content)
+        assertTrue(api.requests.isEmpty())
     }
 
     @Test

@@ -19,11 +19,14 @@ internal object JevValidation {
 
     /** Every request problem, each with its path; body first, in the order jev_decide reports them. */
     fun requestIssues(request: JevRequest, limits: JevLimits, catalog: JevModelCatalog): List<JevIssue> =
-        bodyIssues(request, limits) + modelIssues(request.resolvedWith(catalog), catalog)
+        bodyIssues(request, limits) + modelIssues(request, catalog)
 
-    /** The model must be in the catalog; an id several providers serve must name one. */
-    fun modelIssues(request: JevRequest, catalog: JevModelCatalog): List<JevIssue> =
-        when (val found = catalog.lookup(request.model, request.providerId)) {
+    /** The model must be in the catalog, on the pinned provider if any; an id several providers serve must name one. */
+    fun modelIssues(request: JevRequest, catalog: JevModelCatalog): List<JevIssue> {
+        val pin = request.pinnedProviderId?.takeIf { request.providerId == null }
+        pin?.let { catalog.pinIssue(request.model, it) }?.let { return listOf(it) }
+        val resolved = request.resolved()
+        return when (val found = catalog.lookup(resolved.model, resolved.providerId)) {
             is JevModelLookup.Found -> emptyList()
             is JevModelLookup.Unknown -> listOf(JevIssue(listOf(found.path), found.message))
             is JevModelLookup.Ambiguous -> listOf(JevIssue(
@@ -31,6 +34,7 @@ internal object JevValidation {
                 "Model '${found.model}' is served by ${found.providers.joinToString()}; set provider to one of them",
             ))
         }
+    }
 
     /** Everything but the model: timeout, state, and questions. */
     fun bodyIssues(request: JevRequest, limits: JevLimits): List<JevIssue> {

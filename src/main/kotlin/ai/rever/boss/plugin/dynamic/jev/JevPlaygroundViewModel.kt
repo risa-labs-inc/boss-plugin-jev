@@ -293,11 +293,19 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
 
     // ---- draft over MCP ----
 
-    /** Loads a cold catalog and re-validates the draft against it now, not when the collector runs. */
-    internal suspend fun loadCatalog(): JevPlaygroundState {
-        withContext(Dispatchers.Default) { services.catalog.ensureLoaded() }
+    /**
+     * Loads a cold catalog through the service's admitted, bounded load, then re-validates the
+     * draft now, not when the collector runs. The catalog stays cold when the load timed out.
+     */
+    internal suspend fun loadCatalog(timeoutMs: Long = _state.value.timeoutMs): JevPlaygroundState {
+        withContext(Dispatchers.Default) { decisionService.loadCatalog(timeoutMs) }
         return _state.updateAndGetAtomic { it.recomputed() }
     }
+
+    /** For callers that must not act on a cold catalog. */
+    private suspend fun loadedCatalog(): JevPlaygroundState =
+        loadCatalog().takeIf { decisionService.catalog.refreshed }
+            ?: throw JevFailure("TIMEOUT", "The model catalog did not load in time; try again")
 
     /**
      * Applies [change] in one atomic step and returns the new state. Merge upserts questions by
@@ -321,7 +329,13 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
         }
         change.contextText?.let { next = next.copy(contextText = it, sendAsText = change.sendAsText ?: false) }
         when {
-            change.model != null -> next = next.copy(model = change.model, providerId = change.providerId)
+            change.model != null -> {
+                // The draft's provider pins another model too: kept, never dropped or swapped.
+                val pin = s.providerId.takeIf { change.providerId == null && change.model != s.model }
+                pin?.let { decisionService.catalog.pinIssue(change.model, it) }
+                    ?.let { throw JevFailure("INVALID_INPUT", it.message, it.pathText) }
+                next = next.copy(model = change.model, providerId = change.providerId ?: s.providerId)
+            }
             change.providerId != null -> next = next.copy(providerId = change.providerId)
         }
         change.timeoutMs?.let { next = next.copy(timeoutMs = it) }
@@ -338,7 +352,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
     suspend fun refreshModels() {
         val chat = services.chat
         // The chat list excludes decision models, so it needs the catalog first.
-        withContext(Dispatchers.Default) { runCatching { services.catalog.ensureLoaded() } }
+        withContext(Dispatchers.Default) { runCatching { decisionService.loadCatalog(JevLimits.DEFAULT_TIMEOUT_MS) } }
         val models = withContext(Dispatchers.Default) { runCatching { chat.models() }.getOrDefault(emptyList()) }
         if (models.isEmpty()) return
         val remembered = runCatching { services.storage?.get(COMPOSE_MODEL_KEY) }.getOrNull()
@@ -516,7 +530,8 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
      * Answer pane and history. Returns the run, or throws [JevFailure].
      */
     suspend fun runDraft(): JevRunRecord {
-        loadCatalog()
+        // Only a cold catalog loads here, admitted and bounded; the draft cannot resolve without it.
+        loadedCatalog()
         val job = when (val start = startRun()) {
             JevRunStart.Busy -> throw JevFailure("BUSY", "A run is already in progress in the Jev panel")
             is JevRunStart.Invalid -> throw JevFailure("INVALID_INPUT", "The draft has ${start.issues} issue(s); read them with jev_draft_get")
@@ -666,7 +681,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
     ): JevPreset {
         val repo = services.presets ?: throw JevFailure("PRESET_STORAGE_ERROR", "Preset storage is unavailable")
         // The draft's provider is resolved against a loaded catalog, never the cold default.
-        val value = loadCatalog()
+        val value = loadedCatalog()
         val preset = if (questions != null) {
             JevPreset(name, "", questions.toString(), stateAsJson = false, timeoutMs ?: JevLimits.DEFAULT_TIMEOUT_MS, model ?: JevModelCatalog.DEFAULT.id, providerId)
         } else {

@@ -109,15 +109,16 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
 
     /**
      * Loads the catalog once, so resolution never depends on warmth, then refreshes when [model]
-     * is still unknown, so a model pulled since the last refresh is accepted.
+     * is still unknown, or unlisted by [pinnedProviderId], so a model pulled since is accepted.
      */
-    suspend fun ensure(model: String, providerId: String?, preferredProviderId: String? = null) {
+    suspend fun ensure(model: String, providerId: String?, pinnedProviderId: String? = null) {
         if (!refreshed) {
             refresh()
             return
         }
-        val found = lookup(model, providerFor(model, providerId, preferredProviderId))
-        if (found is JevModelLookup.Unknown) refresh()
+        val pin = pinnedProviderId.takeIf { providerId == null }
+        val unknown = if (pin != null) pinIssue(model, pin) != null else lookup(model, providerId) is JevModelLookup.Unknown
+        if (unknown) refresh()
     }
 
     /** Refreshes once per activation, joining one already in flight; later refreshes are explicit. */
@@ -153,15 +154,19 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
     }
 
     /**
-     * [providerId] when set; else [preferredProviderId] when it serves [model], or is a local
-     * provider that is down (its models are unknown, and state must not leave the machine);
-     * else null, inferred from [model].
+     * Null when [pinnedProviderId] lists [model]. Otherwise the request fails: a pin is never
+     * swapped for another provider, and a provider that is down cannot confirm the model.
      */
-    fun providerFor(model: String, providerId: String?, preferredProviderId: String?): String? {
-        if (providerId != null || preferredProviderId == null) return providerId
-        val serves = _options.value.any { it.id == model && it.providerId.equals(preferredProviderId, ignoreCase = true) }
-        val localDown = providerStatus(preferredProviderId)?.let { it.local && !it.reachable } == true
-        return preferredProviderId.takeIf { serves || localDown }
+    fun pinIssue(model: String, pinnedProviderId: String): JevIssue? {
+        if (_options.value.any { it.id == model && it.providerId.equals(pinnedProviderId, ignoreCase = true) }) return null
+        val status = providerStatus(pinnedProviderId)
+        val name = status?.let { "${it.label} ($pinnedProviderId)" } ?: pinnedProviderId
+        val why = when {
+            !refreshed -> "the model catalog has not loaded, so $name cannot confirm '$model'"
+            status != null && !status.reachable -> "$name is not reachable, so it cannot confirm '$model'"
+            else -> "$name does not serve '$model'"
+        }
+        return JevIssue(listOf("provider"), "This is pinned to $name, and $why; pass provider explicitly to use another provider")
     }
 
     fun find(model: String, providerId: String?): JevModelOption? =
