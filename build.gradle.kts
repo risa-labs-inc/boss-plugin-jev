@@ -59,10 +59,16 @@ tasks.register<Jar>("buildPluginJar") {
 tasks.jar { enabled = false }
 
 tasks.processResources {
-    inputs.property("pluginVersion", version)
-    // Only the top-level version: the filter is per line, and a dependency's "version" is a range.
-    filesMatching("**/plugin.json") {
-        filter { it.replace(Regex("^  \"version\"\\s*:\\s*\"[^\"]*\""), "  \"version\": \"$version\"") }
+    val pluginVersion = version.toString()
+    inputs.property("pluginVersion", pluginVersion)
+    // Parsed, so only the top-level version changes: a dependency's "version" is a range.
+    doLast {
+        val manifest = destinationDir.resolve("META-INF/boss-plugin/plugin.json")
+        @Suppress("UNCHECKED_CAST")
+        val root = groovy.json.JsonSlurper().parse(manifest) as MutableMap<String, Any?>
+        check("version" in root) { "plugin.json has no top-level version" }
+        root["version"] = pluginVersion
+        manifest.writeText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(root)) + "\n")
     }
 }
 
