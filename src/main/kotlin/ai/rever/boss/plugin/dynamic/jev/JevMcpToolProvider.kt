@@ -436,11 +436,15 @@ class JevMcpToolProvider(
         }
         val model = root["model"]?.let { stringArg(it, "model") }
         val provider = root["provider"]?.let { stringArg(it, "provider") }
-        // A preset's provider belongs to its model; an explicit model starts from no provider.
+        // An explicit model keeps the preset's provider only when that provider serves it.
+        val presetProvider = preset?.providerId?.takeIf { p ->
+            model == null || model == preset.model ||
+                service.catalog.options.value.any { it.id == model && it.providerId.equals(p, ignoreCase = true) }
+        }
         return JevRequest(
             state, questions, timeout,
             model = model ?: preset?.model ?: JevModelCatalog.DEFAULT.id,
-            providerId = provider ?: if (model == null) preset?.providerId else null,
+            providerId = provider ?: presetProvider,
         )
     }
 
