@@ -1,0 +1,1 @@
+{"model":"laya:multilingual","state":"I was charged twice for my subscription this month. Please refund the duplicate charge.","questions":{"refund":{"type":"noul","instructions":"Is the customer asking for money back?","criteria":{"true":"The customer requests a refund or reimbursement.","false":"The customer is not requesting money back."}}}}

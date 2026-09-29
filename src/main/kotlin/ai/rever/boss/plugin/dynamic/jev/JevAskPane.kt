@@ -340,7 +340,7 @@ private fun AddQuestionRow(viewModel: JevPlaygroundViewModel, enabled: Boolean) 
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun RunBar(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel, hasKey: Boolean, compact: Boolean) {
+internal fun RunBar(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel, compact: Boolean) {
     val anchors = LocalIssueAnchors.current
     val scope = rememberCoroutineScope()
     FlowRow(
@@ -350,7 +350,10 @@ internal fun RunBar(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel
     ) {
         val center = Modifier.align(Alignment.CenterVertically)
         when {
-            !hasKey -> BossPrimaryButton("Connect OpenRouter", onClick = viewModel::openSettings, modifier = center.height(32.dp))
+            state.readiness == JevReadiness.NeedsOpenRouterKey ->
+                BossPrimaryButton("Connect OpenRouter", onClick = viewModel::openSettings, modifier = center.height(32.dp))
+            state.readiness is JevReadiness.Unavailable ->
+                BossSecondaryButton("Refresh", onClick = viewModel::refreshCatalog, modifier = center.height(32.dp))
             state.placeholders.isNotEmpty() -> BossPrimaryButton(
                 state.placeholders.size.let { if (it == 1) "Fill 1 field" else "Fill $it fields" },
                 onClick = {}, modifier = center.height(32.dp), enabled = false,

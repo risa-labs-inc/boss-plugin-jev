@@ -8,7 +8,7 @@ class JevDynamicPlugin : DynamicPlugin {
     override val displayName = "Jev"
     override val version = "0.2.0"
     override val description =
-        "Ask a decision model structured questions from a sidebar panel or the BOSS MCP server, using the OpenRouter key already configured in BOSS."
+        "Ask a decision model structured questions from a sidebar panel or the BOSS MCP server. Calls go through the AI Gateway, to Jev on OpenRouter or a local model on this machine."
     override val author = "Risa Labs"
     override val url = "https://github.com/risa-labs-inc/boss-plugin-jev"
 

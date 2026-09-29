@@ -13,18 +13,30 @@ import kotlinx.serialization.json.jsonObject
 
 internal object JevValidation {
     /** Throws the first issue so callers that need one failure keep a stable code. */
-    fun request(request: JevRequest, limits: JevLimits) {
-        requestIssues(request, limits).firstOrNull()?.let { throw JevFailure("INVALID_INPUT", it.message, it.pathText) }
+    fun request(request: JevRequest, limits: JevLimits, catalog: JevModelCatalog) {
+        requestIssues(request, limits, catalog).firstOrNull()?.let { throw JevFailure("INVALID_INPUT", it.message, it.pathText) }
     }
 
     /** Every request problem, each with the path of the field that caused it. */
-    fun requestIssues(request: JevRequest, limits: JevLimits): List<JevIssue> {
+    fun requestIssues(request: JevRequest, limits: JevLimits, catalog: JevModelCatalog): List<JevIssue> =
+        modelIssues(request, catalog) + bodyIssues(request, limits)
+
+    /** The model must be in the catalog; an id several providers serve must name one. */
+    fun modelIssues(request: JevRequest, catalog: JevModelCatalog): List<JevIssue> =
+        when (val found = catalog.lookup(request.model, request.providerId)) {
+            is JevModelLookup.Found -> emptyList()
+            is JevModelLookup.Unknown -> listOf(JevIssue(listOf(found.path), found.message))
+            is JevModelLookup.Ambiguous -> listOf(JevIssue(
+                listOf("provider"),
+                "Model '${found.model}' is served by ${found.providers.joinToString()}; set provider to one of them",
+            ))
+        }
+
+    /** Everything but the model: timeout, state, and questions. */
+    fun bodyIssues(request: JevRequest, limits: JevLimits): List<JevIssue> {
         val issues = mutableListOf<JevIssue>()
         fun add(message: String, vararg path: String) { issues += JevIssue(path.toList(), message) }
 
-        if (JevModelCatalog.find(request.model) == null) {
-            add("Unknown model '${request.model}'; available: ${JevModelCatalog.all.joinToString { it.id }}", "model")
-        }
         if (request.timeoutMs !in limits.minTimeoutMs..limits.maxTimeoutMs) {
             add("Timeout must be between ${limits.minTimeoutMs} and ${limits.maxTimeoutMs} ms", "timeout_ms")
         }

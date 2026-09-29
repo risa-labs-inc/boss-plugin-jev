@@ -193,7 +193,7 @@ class JevComposerTest {
         val chat = ScriptedChat(composeReply())
         val run = JevRunRecord(
             7, Instant.EPOCH, JevRunSource.PLAYGROUND, requestAllTypes(),
-            JevDecision(testJson.parseToJsonElement(validResponse) as JsonObject, 10),
+            JevDecision(testJson.parseToJsonElement(validResponse) as JsonObject, 10, JevModelCatalog.DEFAULT),
         )
         JevComposer(chat).compose(
             "why identity? tighten it", draft,
@@ -235,9 +235,17 @@ class JevComposerTest {
     )
 
     @Test
+    fun `chat models exclude local decision models once the catalog lists them`() = runTest {
+        val catalog = JevModelCatalog { FakeDecisionApi(listOf(openRouter(), localRuntime())) }.also { it.refresh() }
+        val local = listOf(AiProviderModels("OLLAMA", "Ollama", listOf(AiAvailableModel("qwen3", "Qwen 3"), AiAvailableModel("laya:en", "laya:en"))))
+        val models = GatewayJevChatClient({ FakeGateway(local, null) }, { null }, catalog::isDecisionModel).models()
+        assertEquals(listOf("qwen3"), models.map { it.modelId })
+    }
+
+    @Test
     fun `lists chat models without decision models and never defaults to openrouter free`() {
         val gateway = FakeGateway(catalog, AiModelInfo("OPENROUTER", "OpenRouter", "openrouter/free"))
-        val client = GatewayJevChatClient({ gateway }, { null })
+        val client = GatewayJevChatClient({ gateway }, { null }, JevModelCatalog()::isDecisionModel)
         val models = client.models()
         assertEquals(listOf("openrouter/free", "anthropic/claude-x"), models.map { it.modelId })
         assertEquals("anthropic/claude-x", client.defaultModel(models)?.modelId)
@@ -247,20 +255,20 @@ class JevComposerTest {
     fun `routes the picked model through extras only when the gateway supports it`() = runTest {
         val picked = JevChatModel("OPENROUTER", "OpenRouter", "anthropic/claude-x")
         val gateway = FakeGateway(catalog, AiModelInfo("ANTHROPIC", "Anthropic", "claude"))
-        GatewayJevChatClient({ gateway }, { null }).complete("sys", listOf(JevChatMessage.user("hi")), picked)
+        GatewayJevChatClient({ gateway }, { null }, JevModelCatalog()::isDecisionModel).complete("sys", listOf(JevChatMessage.user("hi")), picked)
         assertEquals(mapOf("providerId" to "OPENROUTER", "modelOverride" to "anthropic/claude-x"), gateway.requests.single().extras)
 
         val legacy = FakeGateway(catalog, AiModelInfo("ANTHROPIC", "Anthropic", "claude"), caps = emptySet())
-        val refused = assertFailsWith<JevFailure> { GatewayJevChatClient({ legacy }, { null }).complete("sys", emptyList(), picked) }
+        val refused = assertFailsWith<JevFailure> { GatewayJevChatClient({ legacy }, { null }, { false }).complete("sys", emptyList(), picked) }
         assertEquals(JevComposer.MODEL_UNROUTABLE, refused.code)
         assertTrue(legacy.requests.isEmpty())
     }
 
     @Test
     fun `missing gateway or model is a typed failure`() = runTest {
-        val noGateway = assertFailsWith<JevFailure> { GatewayJevChatClient({ null }, { null }).complete("s", emptyList(), null) }
+        val noGateway = assertFailsWith<JevFailure> { GatewayJevChatClient({ null }, { null }, { false }).complete("s", emptyList(), null) }
         assertEquals(JevComposer.NO_GATEWAY, noGateway.code)
-        val noModel = assertFailsWith<JevFailure> { GatewayJevChatClient({ FakeGateway(emptyList(), null) }, { null }).complete("s", emptyList(), null) }
+        val noModel = assertFailsWith<JevFailure> { GatewayJevChatClient({ FakeGateway(emptyList(), null) }, { null }, { false }).complete("s", emptyList(), null) }
         assertEquals(JevComposer.NO_MODEL, noModel.code)
     }
 }

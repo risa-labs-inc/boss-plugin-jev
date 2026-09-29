@@ -1,6 +1,5 @@
 package ai.rever.boss.plugin.dynamic.jev
 
-import java.net.http.HttpTimeoutException
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -21,8 +20,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 class JevDecisionService(
-    private val keyResolver: JevKeyResolver,
-    private val transport: JevTransport = JdkJevTransport(),
+    private val backend: JevDecisionBackend,
+    val catalog: JevModelCatalog = JevModelCatalog(),
     val limits: JevLimits = JevLimits(),
 ) {
     private val json = Json { ignoreUnknownKeys = false }
@@ -39,20 +38,25 @@ class JevDecisionService(
 
     suspend fun decide(request: JevRequest, source: JevRunSource = JevRunSource.PLAYGROUND): JevDecision {
         val decision = execute(request)
-        val record = JevRunRecord(runIds.incrementAndGet(), Instant.now(), source, request, decision)
+        val resolved = request.copy(providerId = decision.model.providerId)
+        val record = JevRunRecord(runIds.incrementAndGet(), Instant.now(), source, resolved, decision)
         _runs.update { (listOf(record) + it).take(limits.maxRunHistory) }
         return decision
     }
 
     private suspend fun execute(request: JevRequest): JevDecision = supervisorScope {
-        JevValidation.request(request, limits)
+        catalog.ensure(request.model, request.providerId)
+        JevValidation.request(request, limits, catalog)
+        // Exactly this provider; the gateway never falls back, and neither does Jev.
+        val model = catalog.find(request.model, request.providerId)
+            ?: throw JevFailure("INVALID_INPUT", "Unknown model '${request.model}'", "model")
         val payload = buildJsonObject {
             put("model", request.model)
             put("state", request.state)
             put("questions", request.questions)
         }
-        val bytes = payload.toString().encodeToByteArray()
-        if (bytes.size > limits.maxRequestBytes) {
+        val body = payload.toString()
+        if (body.encodeToByteArray().size > limits.maxRequestBytes) {
             throw JevFailure("INPUT_TOO_LARGE", "Request exceeds plugin limit ${limits.maxRequestBytes} bytes")
         }
         admit()
@@ -61,22 +65,18 @@ class JevDecisionService(
             withTimeoutOrNull(request.timeoutMs) {
                 permits.withPermit {
                     ensureOpen()
-                    val key = keyResolver.resolveOpenRouterKey()?.takeIf { it.isNotBlank() }
-                        ?: throw JevFailure(
-                            "MISSING_OPENROUTER_KEY",
-                            "Configure an OpenRouter key and select any model in Secret Manager → AI Providers",
-                        )
                     val started = System.nanoTime()
-                    transport.post(bytes, key, request.timeoutMs, limits.maxResponseBytes)
-                        .let { raw ->
-                            val parsed = try {
-                                json.parseToJsonElement(raw.decodeToString()) as? JsonObject
-                            } catch (_: Exception) {
-                                null
-                            } ?: throw JevFailure("MALFORMED_RESPONSE", "OpenRouter returned invalid JSON")
-                            JevValidation.response(parsed, request.questions)
-                            JevDecision(parsed, (System.nanoTime() - started) / 1_000_000)
-                        }
+                    val raw = backend.decide(model, body, request.timeoutMs, limits.maxResponseBytes)
+                    if (raw.encodeToByteArray().size > limits.maxResponseBytes) {
+                        throw JevFailure("RESPONSE_TOO_LARGE", "Response exceeds plugin limit ${limits.maxResponseBytes} bytes")
+                    }
+                    val parsed = try {
+                        json.parseToJsonElement(raw) as? JsonObject
+                    } catch (_: Exception) {
+                        null
+                    } ?: throw JevFailure("MALFORMED_RESPONSE", "${model.providerLabel} returned invalid JSON")
+                    JevValidation.response(parsed, request.questions)
+                    JevDecision(parsed, (System.nanoTime() - started) / 1_000_000, model)
                 }
             } ?: throw JevFailure("TIMEOUT", "Jev request timed out")
         }
@@ -104,10 +104,8 @@ class JevDecisionService(
             throw cancelled
         } catch (failure: JevFailure) {
             throw failure
-        } catch (_: HttpTimeoutException) {
-            throw JevFailure("TIMEOUT", "Jev request timed out")
         } catch (_: Exception) {
-            throw JevFailure("NETWORK_ERROR", "Could not reach OpenRouter")
+            throw JevFailure(JevDecisionErrors.UPSTREAM_ERROR, "${model.providerLabel} could not complete the request")
         }
     }
 
@@ -118,7 +116,6 @@ class JevDecisionService(
             operations.toList()
         }
         pending.forEach { it.cancel(ServiceClosedCancellation()) }
-        transport.cancelAll()
         _runs.value = emptyList()
     }
 
@@ -135,8 +132,4 @@ class JevDecisionService(
     }
 
     private class ServiceClosedCancellation : CancellationException("Jev is unloading")
-
-    companion object {
-        val DEFAULT_MODEL: String get() = JevModelCatalog.DEFAULT.id
-    }
 }

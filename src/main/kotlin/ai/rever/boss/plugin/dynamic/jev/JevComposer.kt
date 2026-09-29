@@ -50,6 +50,7 @@ interface JevChatClient {
 class GatewayJevChatClient(
     private val gateway: () -> AiGatewayAPI?,
     private val llmProvider: () -> LlmProvider?,
+    private val isDecisionModel: (String) -> Boolean,
 ) : JevChatClient {
     override fun gatewayAvailable(): Boolean = runCatching { gateway() }.getOrNull() != null
 
@@ -75,7 +76,7 @@ class GatewayJevChatClient(
             }
         }
         // Decision models are not chat models, even when a catalog lists them.
-        return listed.filter { m -> JevModelCatalog.find(m.modelId) == null }.distinctBy { it.key }
+        return listed.filter { m -> !isDecisionModel(m.modelId) }.distinctBy { it.key }
     }
 
     override fun defaultModel(models: List<JevChatModel>): JevChatModel? {
@@ -234,7 +235,7 @@ class JevComposer(
         val questions = result.questions ?: draft.questions
             ?: return issues + JevIssue(listOf("questions"), "questions is required: the current questions JSON does not parse")
         val request = JevRequest(state ?: JsonPrimitive("placeholder"), questions, draft.timeoutMs, draft.model)
-        issues += JevValidation.requestIssues(request, limits).filter { it.path.firstOrNull() == "questions" || (state != null && it.path.firstOrNull() == "state") }
+        issues += JevValidation.bodyIssues(request, limits).filter { it.path.firstOrNull() == "questions" || (state != null && it.path.firstOrNull() == "state") }
         questions.keys.filterNot { SNAKE_CASE.matches(it) }.forEach {
             issues += JevIssue(listOf("questions", it), "Question IDs must be snake_case, such as page_oncall")
         }

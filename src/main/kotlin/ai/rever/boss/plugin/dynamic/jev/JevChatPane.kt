@@ -75,7 +75,7 @@ internal val EXAMPLE_PROMPTS = listOf(
 
 /** The conversation column: thread or empty state, then the composer and Run pinned at the bottom. */
 @Composable
-internal fun ChatPane(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel, hasKey: Boolean) {
+internal fun ChatPane(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel) {
     val compose by viewModel.compose.collectAsState()
     val runs by viewModel.runs.collectAsState()
     LaunchedEffect(compose.models.isEmpty()) { if (compose.models.isEmpty()) viewModel.refreshModels() }
@@ -86,7 +86,7 @@ internal fun ChatPane(state: JevPlaygroundState, viewModel: JevPlaygroundViewMod
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 if (empty) EmptyState(compose, viewModel) else Thread(state, compose, runs, viewModel)
             }
-            Dock(state, compose, viewModel, hasKey, compact, showComposer = !empty)
+            Dock(state, compose, viewModel, compact, showComposer = !empty)
         }
     }
 }
@@ -481,7 +481,6 @@ internal fun Dock(
     state: JevPlaygroundState,
     compose: JevComposeState,
     viewModel: JevPlaygroundViewModel,
-    hasKey: Boolean,
     compact: Boolean,
     showComposer: Boolean,
 ) {
@@ -496,6 +495,6 @@ internal fun Dock(
                 ModelFooter(compose, viewModel)
             }
         }
-        RunBar(state, viewModel, hasKey, compact)
+        RunBar(state, viewModel, compact)
     }
 }

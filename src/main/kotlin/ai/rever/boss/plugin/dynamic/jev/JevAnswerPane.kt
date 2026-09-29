@@ -62,7 +62,7 @@ private val clock = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemD
 private val prettyJson = Json { prettyPrint = true }
 
 @Composable
-internal fun AnswerPane(state: JevPlaygroundState, runs: List<JevRunRecord>, viewModel: JevPlaygroundViewModel, hasKey: Boolean) {
+internal fun AnswerPane(state: JevPlaygroundState, runs: List<JevRunRecord>, viewModel: JevPlaygroundViewModel) {
     val displayed = if (state.error != null && state.selectedRunId == null) null
     else runs.firstOrNull { it.id == state.selectedRunId } ?: runs.firstOrNull()
     Column(Modifier.fillMaxSize().background(JevTokens.Content)) {
@@ -75,9 +75,11 @@ internal fun AnswerPane(state: JevPlaygroundState, runs: List<JevRunRecord>, vie
                     when {
                         state.running -> RunningView(state)
                         error != null && state.selectedRunId == null ->
-                            if (error.code == "MISSING_OPENROUTER_KEY") SetupCard(viewModel) else ErrorCard(error, viewModel, hasRuns = runs.isNotEmpty())
+                            if (error.code == JevDecisionErrors.MISSING_CREDENTIAL && state.modelOption?.providerId == JevModelCatalog.OPENROUTER) SetupCard(viewModel)
+                            else ErrorCard(error, state.modelOption, viewModel, hasRuns = runs.isNotEmpty())
                         displayed != null -> RunView(displayed, runs, state, viewModel, compact)
-                        !hasKey -> SetupCard(viewModel)
+                        state.readiness == JevReadiness.NeedsOpenRouterKey -> SetupCard(viewModel)
+                        state.readiness is JevReadiness.Unavailable -> UnavailableCard(state.readiness.detail, viewModel)
                         else -> Text(
                             "No answers yet. Run the draft and the full answer shows here: the verdict, every probability, and the change since the last run.",
                             color = JevTokens.TextSecondary, fontSize = 12.sp, lineHeight = 17.sp,
@@ -133,6 +135,8 @@ private fun RunView(run: JevRunRecord, runs: List<JevRunRecord>, state: JevPlayg
             it["cost"]?.jsonPrimitive?.doubleOrNull?.let { cost -> MetaItem("", "$%.5f".format(cost)) }
         }
         (response["model"] as? JsonPrimitive)?.content?.let { MetaItem("", it) }
+        MetaItem("", run.decision.model.providerLabel)
+        if (run.decision.model.local) MetaItem("", "local")
     }
 
     if (run.source == JevRunSource.MCP) {
@@ -343,7 +347,7 @@ private fun RunningView(state: JevPlaygroundState) {
     }
     val elapsed = (now - state.runStartedAtMs).coerceAtLeast(0) / 1000.0
     Text(
-        "Asking ${JevModelCatalog.find(state.model)?.label ?: state.model} · %.1f s of %d s".format(elapsed, state.timeoutMs / 1000),
+        "Asking ${state.modelOption?.label ?: state.model} · %.1f s of %d s".format(elapsed, state.timeoutMs / 1000),
         color = JevTokens.TextSecondary, fontSize = 12.sp,
     )
     val ids = state.request?.questions?.keys?.toList().orEmpty()
@@ -371,15 +375,29 @@ private fun SetupCard(viewModel: JevPlaygroundViewModel) {
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text("Connect OpenRouter to run Jev", color = JevTokens.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        Text("1. Open Secret Manager → AI Providers and add your OpenRouter key.", color = JevTokens.TextSecondary, fontSize = 12.sp)
-        Text("2. Select any OpenRouter model there. Jev uses the model picked in this panel.", color = JevTokens.TextSecondary, fontSize = 12.sp)
+        Text("Open Secret Manager → AI Providers and add your OpenRouter key, or pick a local model in the header.", color = JevTokens.TextSecondary, fontSize = 12.sp)
         BossPrimaryButton("Open AI Providers", onClick = viewModel::openSettings)
         Text("You can write questions now. Run unlocks once the key is found.", color = JevTokens.TextMuted, fontSize = 12.sp)
     }
 }
 
+/** The selected model's provider is down or missing, such as a local runtime that is not started. */
 @Composable
-private fun ErrorCard(error: JevRunError, viewModel: JevPlaygroundViewModel, hasRuns: Boolean) {
+private fun UnavailableCard(detail: String, viewModel: JevPlaygroundViewModel) {
+    Column(
+        Modifier.fillMaxWidth().clip(JevTokens.Shape).background(JevTokens.Panel)
+            .border(1.dp, JevTokens.Warning.copy(alpha = 0.45f), JevTokens.Shape).padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text("The selected model is not reachable", color = JevTokens.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text(detail, color = JevTokens.TextSecondary, fontSize = 12.sp)
+        BossSecondaryButton("Refresh", onClick = viewModel::refreshCatalog)
+        Text("You can write questions now, or pick another model in the header.", color = JevTokens.TextMuted, fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun ErrorCard(error: JevRunError, model: JevModelOption?, viewModel: JevPlaygroundViewModel, hasRuns: Boolean) {
     Column(
         Modifier.fillMaxWidth().clip(JevTokens.Shape).background(JevTokens.Panel)
             .border(1.dp, JevTokens.Error.copy(alpha = 0.5f), JevTokens.Shape).padding(14.dp),
@@ -387,19 +405,27 @@ private fun ErrorCard(error: JevRunError, viewModel: JevPlaygroundViewModel, has
     ) {
         Text(error.code, color = JevTokens.Error, fontSize = 11.sp, fontFamily = JevTokens.Mono)
         Text("Jev did not answer", color = JevTokens.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        Text("${error.message}. ${adviceFor(error.code)}", color = JevTokens.TextSecondary, fontSize = 12.sp)
+        Text("${error.message.trimEnd('.')}. ${adviceFor(error.code, model)}", color = JevTokens.TextSecondary, fontSize = 12.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
-            if (error.code == "AUTH_ERROR") BossSecondaryButton("Open AI Providers", onClick = viewModel::openSettings)
+            if (error.code in CREDENTIAL_CODES && model?.local != true) BossSecondaryButton("Open AI Providers", onClick = viewModel::openSettings)
+            if (error.code in REFRESH_CODES) BossSecondaryButton("Refresh", onClick = viewModel::refreshCatalog)
             BossSecondaryButton("Run again", onClick = viewModel::run)
         }
         if (hasRuns) Text("Earlier runs are still in the strip above.", color = JevTokens.TextMuted, fontSize = 12.sp)
     }
 }
 
-private fun adviceFor(code: String): String = when (code) {
+private val CREDENTIAL_CODES = setOf("AUTH_ERROR", JevDecisionErrors.MISSING_CREDENTIAL)
+private val REFRESH_CODES = setOf(JevDecisionErrors.LOCAL_UNAVAILABLE, JevDecisionErrors.GATEWAY_UNAVAILABLE, "MODEL_NOT_FOUND")
+
+private fun adviceFor(code: String, model: JevModelOption?): String = when (code) {
     "TIMEOUT" -> "Raise the timeout or trim the questions, then run again."
     "RATE_LIMITED" -> "Wait a minute, then run again."
-    "AUTH_ERROR" -> "Check the OpenRouter key in Secret Manager → AI Providers."
+    "AUTH_ERROR", JevDecisionErrors.MISSING_CREDENTIAL ->
+        "Check the ${model?.providerLabel ?: "provider"} key in Secret Manager → AI Providers."
+    JevDecisionErrors.LOCAL_UNAVAILABLE -> "Start the local runtime, then Refresh."
+    JevDecisionErrors.GATEWAY_UNAVAILABLE -> "Then Refresh."
+    "MODEL_NOT_FOUND" -> if (model?.local == true) "Pull the model, then Refresh." else "Pick another model in the header."
     "BUSY" -> "Wait for running calls to finish, then run again."
     "NETWORK_ERROR" -> "Check the connection, then run again."
     "INPUT_TOO_LARGE" -> "Shorten the context or remove questions."

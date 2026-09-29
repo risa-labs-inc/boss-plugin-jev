@@ -3,7 +3,6 @@ package ai.rever.boss.plugin.dynamic.jev
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -17,7 +16,6 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
-import java.net.http.HttpTimeoutException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -26,30 +24,19 @@ import kotlinx.serialization.json.jsonPrimitive
 class JevDecisionServiceTest {
     @Test
     fun `sends exact contract body and validates all answer types`() = runTest {
-        val transport = CapturingTransport()
-        var resolves = 0
-        val service = JevDecisionService(JevKeyResolver { resolves++; "secret-key" }, transport)
+        val transport = CapturingBackend()
+        val service = JevDecisionService(transport)
 
         val result = service.decide(requestAllTypes())
 
-        assertEquals(1, resolves)
-        assertEquals("secret-key", transport.token)
-        val sent = testJson.parseToJsonElement(transport.body!!.decodeToString()).jsonObject
+        assertEquals(listOf("OPENROUTER"), transport.providers)
+        val sent = testJson.parseToJsonElement(transport.body!!).jsonObject
         assertEquals(setOf("model", "state", "questions"), sent.keys)
-        assertEquals(JevDecisionService.DEFAULT_MODEL, sent["model"]!!.jsonPrimitive.content)
+        assertEquals(JevModelCatalog.DEFAULT.id, sent["model"]!!.jsonPrimitive.content)
+        assertEquals("OPENROUTER", service.runs.value.single().providerId)
+        assertEquals("OPENROUTER", service.runs.value.single().request.providerId)
         assertEquals("identity", result.response["answers"]!!.jsonObject["route"]!!.jsonObject["choice"]!!.jsonPrimitive.content)
         assertTrue(result.latencyMs >= 0)
-    }
-
-    @Test
-    fun `resolves key lazily for each call`() = runTest {
-        val transport = CapturingTransport()
-        var key: String? = null
-        val service = JevDecisionService(JevKeyResolver { key }, transport)
-        assertEquals("MISSING_OPENROUTER_KEY", assertFailsWith<JevFailure> { service.decide(requestAllTypes()) }.code)
-        key = "later"
-        service.decide(requestAllTypes())
-        assertEquals("later", transport.token)
     }
 
     @Test
@@ -61,7 +48,7 @@ class JevDecisionServiceTest {
             """{"x":{"type":"unknown","instructions":"decide"}}""",
             """{"x":{"type":"noul","instructions":"decide","criteria":{"maybe":"bad"}}}""",
         )
-        val service = JevDecisionService(JevKeyResolver { "key" }, CapturingTransport())
+        val service = JevDecisionService(CapturingBackend())
         invalidQuestions.forEach { raw ->
             val request = requestAllTypes().copy(questions = testJson.parseToJsonElement(raw) as JsonObject)
             assertEquals("INVALID_INPUT", assertFailsWith<JevFailure> { service.decide(request) }.code, raw)
@@ -79,7 +66,7 @@ class JevDecisionServiceTest {
             validResponse.replace("\"confidence\":0.75", "\"confidence\":1.5"),
         )
         cases.forEach { response ->
-            val service = JevDecisionService(JevKeyResolver { "key" }, CapturingTransport(response))
+            val service = JevDecisionService(CapturingBackend(response))
             assertEquals("MALFORMED_RESPONSE", assertFailsWith<JevFailure> { service.decide(requestAllTypes()) }.code)
         }
     }
@@ -93,17 +80,17 @@ class JevDecisionServiceTest {
         val probs = (1..n).joinToString(",") { "\"o$it\":${if (it == 1) "0.0055" else "0.005"}" }
         val questions = testJson.parseToJsonElement("""{"pick":{"type":"choice","instructions":"pick","criteria":{$options}}}""") as JsonObject
         val ok = """{"model":"typesafe/jev-1.13","answers":{"pick":{"type":"choice","choice":"o1","probabilities":{$probs},"confidence":0.5}},"usage":{"input_tokens":1,"output_tokens":1}}"""
-        val service = JevDecisionService(JevKeyResolver { "key" }, CapturingTransport(ok))
+        val service = JevDecisionService(CapturingBackend(ok))
         service.decide(requestAllTypes().copy(questions = questions))
 
         val bad = ok.replace("\"o1\":0.0055", "\"o1\":0.2")
-        val strict = JevDecisionService(JevKeyResolver { "key" }, CapturingTransport(bad))
+        val strict = JevDecisionService(CapturingBackend(bad))
         assertEquals("MALFORMED_RESPONSE", assertFailsWith<JevFailure> { strict.decide(requestAllTypes().copy(questions = questions)) }.code)
     }
 
     @Test
     fun `accepts official fractional probability weighted score`() = runTest {
-        val service = JevDecisionService(JevKeyResolver { "key" }, CapturingTransport(validResponse))
+        val service = JevDecisionService(CapturingBackend(validResponse))
         assertEquals("1.05", service.decide(requestAllTypes()).response["answers"]!!.jsonObject["readiness"]!!.jsonObject["score"]!!.jsonPrimitive.content)
     }
 
@@ -117,65 +104,51 @@ class JevDecisionServiceTest {
             validResponse.replace("\"cost\":0.002", "\"cost\":{}"),
         )
         cases.forEach { response ->
-            val service = JevDecisionService(JevKeyResolver { "key" }, CapturingTransport(response))
+            val service = JevDecisionService(CapturingBackend(response))
             assertEquals("MALFORMED_RESPONSE", assertFailsWith<JevFailure> { service.decide(requestAllTypes()) }.code)
         }
     }
 
     @Test
-    fun `timeout cancels underlying transport`() = runTest {
+    fun `timeout cancels the gateway call`() = runTest {
         val cancelled = CompletableDeferred<Unit>()
-        val transport = object : JevTransport {
-            override suspend fun post(body: ByteArray, bearerToken: String, timeoutMs: Long, maxResponseBytes: Int): ByteArray =
-                suspendCancellableCoroutine { continuation ->
-                    continuation.invokeOnCancellation { cancelled.complete(Unit) }
-                }
+        val backend = JevDecisionBackend { _, _, _, _ ->
+            suspendCancellableCoroutine { continuation -> continuation.invokeOnCancellation { cancelled.complete(Unit) } }
         }
-        val service = JevDecisionService(
-            JevKeyResolver { "key" },
-            transport,
-            JevLimits(minTimeoutMs = 1, maxTimeoutMs = 1_000),
-        )
+        val service = JevDecisionService(backend, limits = JevLimits(minTimeoutMs = 1, maxTimeoutMs = 1_000))
         assertEquals("TIMEOUT", assertFailsWith<JevFailure> { service.decide(requestAllTypes(10)) }.code)
         assertTrue(cancelled.isCompleted)
     }
 
     @Test
-    fun `caller cancellation reaches transport and close performs cleanup`() = runTest {
+    fun `caller cancellation reaches the gateway call and close refuses later calls`() = runTest {
         val entered = CompletableDeferred<Unit>()
         val cancelled = CompletableDeferred<Unit>()
-        var cleanup = false
-        val transport = object : JevTransport {
-            override suspend fun post(body: ByteArray, bearerToken: String, timeoutMs: Long, maxResponseBytes: Int): ByteArray =
-                suspendCancellableCoroutine { continuation ->
-                    entered.complete(Unit)
-                    continuation.invokeOnCancellation { cancelled.complete(Unit) }
-                }
-            override fun cancelAll() { cleanup = true }
+        val backend = JevDecisionBackend { _, _, _, _ ->
+            suspendCancellableCoroutine { continuation ->
+                entered.complete(Unit)
+                continuation.invokeOnCancellation { cancelled.complete(Unit) }
+            }
         }
-        val service = JevDecisionService(JevKeyResolver { "key" }, transport)
+        val service = JevDecisionService(backend)
         val job = launch { service.decide(requestAllTypes()) }
         entered.await()
         job.cancelAndJoin()
         assertTrue(cancelled.isCompleted)
         service.close()
-        assertTrue(cleanup)
         assertEquals("SERVICE_UNAVAILABLE", assertFailsWith<JevFailure> { service.decide(requestAllTypes()) }.code)
     }
 
     @Test
     fun `deadline includes queue wait and admission is bounded`() = runTest {
         val entered = CompletableDeferred<Unit>()
-        val transport = object : JevTransport {
-            override suspend fun post(body: ByteArray, bearerToken: String, timeoutMs: Long, maxResponseBytes: Int): ByteArray {
-                entered.complete(Unit)
-                awaitCancellation()
-            }
+        val backend = JevDecisionBackend { _, _, _, _ ->
+            entered.complete(Unit)
+            awaitCancellation()
         }
         val service = JevDecisionService(
-            JevKeyResolver { "key" },
-            transport,
-            JevLimits(maxConcurrentRequests = 1, maxWaitingRequests = 1, minTimeoutMs = 1, maxTimeoutMs = 2_000),
+            backend,
+            limits = JevLimits(maxConcurrentRequests = 1, maxWaitingRequests = 1, minTimeoutMs = 1, maxTimeoutMs = 2_000),
         )
         val active = launch { runCatching { service.decide(requestAllTypes(1_000)) } }
         entered.await()
@@ -191,17 +164,11 @@ class JevDecisionServiceTest {
     @Test
     fun `close cancels active and queued operations`() = runTest {
         val entered = CompletableDeferred<Unit>()
-        val transport = object : JevTransport {
-            override suspend fun post(body: ByteArray, bearerToken: String, timeoutMs: Long, maxResponseBytes: Int): ByteArray {
-                entered.complete(Unit)
-                awaitCancellation()
-            }
+        val backend = JevDecisionBackend { _, _, _, _ ->
+            entered.complete(Unit)
+            awaitCancellation()
         }
-        val service = JevDecisionService(
-            JevKeyResolver { "key" },
-            transport,
-            JevLimits(maxConcurrentRequests = 1, maxWaitingRequests = 1),
-        )
+        val service = JevDecisionService(backend, limits = JevLimits(maxConcurrentRequests = 1, maxWaitingRequests = 1))
         val active = async { assertFailsWith<JevFailure> { service.decide(requestAllTypes()) }.code }
         entered.await()
         val queued = async { assertFailsWith<JevFailure> { service.decide(requestAllTypes()) }.code }
@@ -212,48 +179,27 @@ class JevDecisionServiceTest {
     }
 
     @Test
-    fun `HTTP timeout maps safely without retaining network exception cause`() = runTest {
-        val timeoutTransport = object : JevTransport {
-            override suspend fun post(body: ByteArray, bearerToken: String, timeoutMs: Long, maxResponseBytes: Int): ByteArray {
-                throw HttpTimeoutException("private-host.example")
-            }
-        }
-        val failure = assertFailsWith<JevFailure> {
-            JevDecisionService(JevKeyResolver { "key" }, timeoutTransport).decide(requestAllTypes())
-        }
-        assertEquals("TIMEOUT", failure.code)
+    fun `an unexpected backend exception maps to UPSTREAM_ERROR without retaining details`() = runTest {
+        val backend = JevDecisionBackend { _, _, _, _ -> throw IllegalStateException("private-network.example:8443") }
+        val failure = assertFailsWith<JevFailure> { JevDecisionService(backend).decide(requestAllTypes()) }
+        assertEquals("UPSTREAM_ERROR", failure.code)
+        assertEquals("OpenRouter could not complete the request", failure.message)
         assertEquals(null, failure.cause)
     }
 
     @Test
-    fun `generic transport exception maps safely without retaining details`() = runTest {
-        val transport = object : JevTransport {
-            override suspend fun post(body: ByteArray, bearerToken: String, timeoutMs: Long, maxResponseBytes: Int): ByteArray {
-                throw IllegalStateException("private-network.example:8443")
-            }
-        }
-        val failure = assertFailsWith<JevFailure> {
-            JevDecisionService(JevKeyResolver { "key" }, transport).decide(requestAllTypes())
-        }
-        assertEquals("NETWORK_ERROR", failure.code)
-        assertEquals("Could not reach OpenRouter", failure.message)
-        assertEquals(null, failure.cause)
+    fun `a backend reply over the response limit is refused`() = runTest {
+        val service = JevDecisionService(CapturingBackend(validResponse), limits = JevLimits(maxResponseBytes = 64))
+        assertEquals("RESPONSE_TOO_LARGE", assertFailsWith<JevFailure> { service.decide(requestAllTypes()) }.code)
     }
 
     @Test
     fun `shorter caller deadline remains caller cancellation`() = runTest {
         val cancelled = CompletableDeferred<Unit>()
-        val transport = object : JevTransport {
-            override suspend fun post(body: ByteArray, bearerToken: String, timeoutMs: Long, maxResponseBytes: Int): ByteArray =
-                suspendCancellableCoroutine { continuation ->
-                    continuation.invokeOnCancellation { cancelled.complete(Unit) }
-                }
+        val backend = JevDecisionBackend { _, _, _, _ ->
+            suspendCancellableCoroutine { continuation -> continuation.invokeOnCancellation { cancelled.complete(Unit) } }
         }
-        val service = JevDecisionService(
-            JevKeyResolver { "key" },
-            transport,
-            JevLimits(minTimeoutMs = 1, maxTimeoutMs = 2_000),
-        )
+        val service = JevDecisionService(backend, limits = JevLimits(minTimeoutMs = 1, maxTimeoutMs = 2_000))
         assertFailsWith<TimeoutCancellationException> {
             withTimeout(10) { service.decide(requestAllTypes(1_000)) }
         }

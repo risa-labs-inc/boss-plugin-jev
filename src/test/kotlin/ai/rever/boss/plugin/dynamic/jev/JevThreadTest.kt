@@ -33,13 +33,13 @@ class JevThreadTest {
     @BeforeTest fun setUp() = Dispatchers.setMain(UnconfinedTestDispatcher())
     @AfterTest fun tearDown() = Dispatchers.resetMain()
 
-    private fun services(chat: JevChatClient, key: String? = "k") = JevPluginServices(
+    private fun services(chat: JevChatClient) = JevPluginServices(
         object : PluginContext {
             override val panelRegistry = PanelRegistry()
             override val tabRegistry = TabRegistry()
             override val pluginScope = CoroutineScope(SupervisorJob())
         },
-        CapturingTransport(), JevKeyResolver { key }, chat,
+        CapturingBackend(), chat,
     )
 
     private fun obj(raw: String) = testJson.parseToJsonElement(raw) as JsonObject

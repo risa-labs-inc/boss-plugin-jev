@@ -1,5 +1,10 @@
 package ai.rever.boss.plugin.dynamic.jev
 
+import ai.rever.boss.plugin.api.AiDecisionAPI
+import ai.rever.boss.plugin.api.AiDecisionModel
+import ai.rever.boss.plugin.api.AiDecisionProvider
+import ai.rever.boss.plugin.api.AiDecisionReply
+import ai.rever.boss.plugin.api.AiDecisionRequest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 
@@ -27,16 +32,43 @@ internal val validResponse = """{
   "usage":{"input_tokens":22,"output_tokens":10,"cost":0.002}
 }""".trimIndent()
 
-internal class CapturingTransport(var response: String = validResponse) : JevTransport {
-    var body: ByteArray? = null
-    var token: String? = null
-    var cancelCount = 0
+/** Stands in for the AI Gateway's decide; records what it was sent. */
+internal class CapturingBackend(var response: String = validResponse) : JevDecisionBackend {
+    var body: String? = null
+    val providers = mutableListOf<String>()
+    /** When set, every call fails with it, after being recorded. */
+    var failure: JevFailure? = null
 
-    override suspend fun post(body: ByteArray, bearerToken: String, timeoutMs: Long, maxResponseBytes: Int): ByteArray {
+    override suspend fun decide(model: JevModelOption, body: String, timeoutMs: Long, maxResponseBytes: Int): String {
+        providers += model.providerId
+        failure?.let { throw it }
         this.body = body
-        token = bearerToken
-        return response.encodeToByteArray()
+        return response
     }
-
-    override fun cancelAll() { cancelCount++ }
 }
+
+internal fun missingCredential() = JevFailure("MISSING_CREDENTIAL", "Add an OpenRouter key in Secret Manager → AI Providers")
+
+/** A gateway decision API with fixed providers and a scripted decide. */
+internal class FakeDecisionApi(
+    var providers: List<AiDecisionProvider> = listOf(openRouter()),
+    var reply: (AiDecisionRequest) -> Result<AiDecisionReply> = { Result.success(AiDecisionReply(validResponse, it.providerId, 1)) },
+) : AiDecisionAPI {
+    val requests = mutableListOf<AiDecisionRequest>()
+    var listings = 0
+
+    override suspend fun decisionProviders(): List<AiDecisionProvider> { listings++; return providers }
+    override suspend fun decide(request: AiDecisionRequest): Result<AiDecisionReply> { requests += request; return reply(request) }
+}
+
+internal fun openRouter(reachable: Boolean = true) = AiDecisionProvider(
+    "OPENROUTER", "OpenRouter", local = false, reachable = reachable,
+    models = listOf(AiDecisionModel("typesafe/jev-1.13", "jev-1.13")),
+    detail = if (reachable) null else "Add an OpenRouter key in Secret Manager → AI Providers",
+)
+
+internal fun localRuntime(reachable: Boolean = true, vararg models: String = arrayOf("laya:en", "laya:multilingual")) = AiDecisionProvider(
+    "LOCAL_SYSTEMONE", "Local", local = true, reachable = reachable,
+    models = if (reachable) models.map { AiDecisionModel(it) } else emptyList(),
+    detail = if (reachable) "127.0.0.1:11435" else "No local decision runtime at 127.0.0.1:11435. Start one with `ollaya serve`.",
+)

@@ -44,6 +44,11 @@ data class JevPlaygroundState(
     val jsonOnly: Boolean = false,
     val timeoutMs: Long = JevLimits.DEFAULT_TIMEOUT_MS,
     val model: String = JevModelCatalog.DEFAULT.id,
+    /** Null infers the provider from [model]. */
+    val providerId: String? = null,
+    /** The catalog entry [model] resolves to, or null while it does not. */
+    val modelOption: JevModelOption? = null,
+    val readiness: JevReadiness = JevReadiness.Ready,
     val contextFormat: JevContextFormat = JevContextFormat.Empty,
     val issues: List<JevFormIssue> = emptyList(),
     /** [issues] with API paths such as `questions.route.criteria`, for MCP callers. */
@@ -128,6 +133,8 @@ data class JevDraftChange(
     val mode: JevDraftMode = JevDraftMode.REPLACE,
     val removeQuestions: List<String> = emptyList(),
     val model: String? = null,
+    /** With [model], null infers the provider; alone, it moves the current model to that provider. */
+    val providerId: String? = null,
     val timeoutMs: Long? = null,
 )
 
@@ -164,11 +171,15 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
     private val _state = MutableStateFlow(JevPlaygroundState().recomputed())
     val state: StateFlow<JevPlaygroundState> = _state.asStateFlow()
     val runs: StateFlow<List<JevRunRecord>> = decisionService.runs
+    val models: StateFlow<List<JevModelOption>> = services.catalog.options
+    val modelProviders: StateFlow<List<JevProviderStatus>> = services.catalog.providers
     private val _compose = MutableStateFlow(JevComposeState())
     val compose: StateFlow<JevComposeState> = _compose.asStateFlow()
 
     init {
         refreshPresets()
+        // A refresh can make the draft's model known, unknown, reachable or not.
+        scope.launch { services.catalog.options.collect { update { recomputed() } } }
         scope.launch {
             decisionService.runs.collect { runs ->
                 val newest = runs.firstOrNull()?.id ?: 0L
@@ -241,7 +252,12 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
     }
 
     fun setTimeout(ms: Long) = edit { copy(timeoutMs = ms) }
-    fun setModel(id: String) = edit { copy(model = id) }
+    fun setModel(id: String, providerId: String?) = edit { copy(model = id, providerId = providerId) }
+
+    /** Re-reads the decision models; local providers are probed live, so never on the UI thread. */
+    fun refreshCatalog() {
+        scope.launch(Dispatchers.Default) { runCatching { services.catalog.refresh() } }
+    }
 
     // ---- draft over MCP ----
 
@@ -266,7 +282,10 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
             next = next.applyQuestions(JsonObject(base - change.removeQuestions.toSet()))
         }
         change.contextText?.let { next = next.copy(contextText = it, sendAsText = change.sendAsText ?: false) }
-        change.model?.let { next = next.copy(model = it) }
+        when {
+            change.model != null -> next = next.copy(model = change.model, providerId = change.providerId)
+            change.providerId != null -> next = next.copy(providerId = change.providerId)
+        }
         change.timeoutMs?.let { next = next.copy(timeoutMs = it) }
         next.copy(dirty = true).recomputed()
     }.also { noteEdit(byAgent = true) }
@@ -280,6 +299,8 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
      */
     suspend fun refreshModels() {
         val chat = services.chat
+        // The chat list excludes decision models, so it needs the catalog first.
+        withContext(Dispatchers.Default) { runCatching { services.catalog.ensureLoaded() } }
         val models = withContext(Dispatchers.Default) { runCatching { chat.models() }.getOrDefault(emptyList()) }
         if (models.isEmpty()) return
         val remembered = runCatching { services.storage?.get(COMPOSE_MODEL_KEY) }.getOrNull()
@@ -443,9 +464,6 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
     // ---- running ----
     fun run() {
         when (val start = startRun()) {
-            JevRunStart.MissingKey -> update {
-                copy(pane = JevPane.ANSWER, side = JevPane.ANSWER, selectedRunId = null, error = JevRunError("MISSING_OPENROUTER_KEY", "Add an OpenRouter key in Secret Manager → AI Providers"))
-            }
             is JevRunStart.Invalid -> notice(when {
                 _state.value.placeholders.isNotEmpty() -> "Fill the ${_state.value.placeholders.size} marked fields before running"
                 start.issues == 1 -> "Fix 1 issue before running"
@@ -462,7 +480,6 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
     suspend fun runDraft(): JevRunRecord {
         val job = when (val start = startRun()) {
             JevRunStart.Busy -> throw JevFailure("BUSY", "A run is already in progress in the Jev panel")
-            JevRunStart.MissingKey -> throw JevFailure("MISSING_OPENROUTER_KEY", "Add an OpenRouter key in Secret Manager → AI Providers")
             is JevRunStart.Invalid -> throw JevFailure("INVALID_INPUT", "The draft has ${start.issues} issue(s); read them with jev_draft_get")
             is JevRunStart.Started -> start.job
         }
@@ -479,14 +496,12 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
 
     private sealed interface JevRunStart {
         data object Busy : JevRunStart
-        data object MissingKey : JevRunStart
         data class Invalid(val issues: Int) : JevRunStart
         data class Started(val job: Deferred<JevRunRecord?>) : JevRunStart
     }
 
     private fun startRun(): JevRunStart = synchronized(runLock) {
         if (runJob?.isActive == true) return JevRunStart.Busy
-        if (!hasOpenRouterKey()) return JevRunStart.MissingKey
         val snapshot = _state.value
         val request = snapshot.request ?: return JevRunStart.Invalid(snapshot.issues.size)
         // The thread gets a compact answer card; the full answer is on the right when there is room.
@@ -504,7 +519,10 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
             } catch (failure: Exception) {
                 val error = (failure as? JevFailure)?.let { JevRunError(it.code, it.message) }
                     ?: JevRunError("SERVICE_UNAVAILABLE", "Jev could not complete the request")
-                update { copy(running = false, selectedRunId = null, error = error) }
+                // A setup failure needs its card on screen, even in the narrow layout.
+                val setup = error.code in SETUP_CODES
+                update { copy(running = false, selectedRunId = null, error = error, pane = if (setup) JevPane.ANSWER else pane) }
+                if (error.code in STALE_CATALOG_CODES) refreshCatalog()
                 _compose.updateFlow { it.copy(items = it.items + JevThreadItem.RunFailed(nextItemId(), error)) }
                 null
             }
@@ -535,6 +553,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
                 sendAsText = state is JsonPrimitive && looksLikeJson(text),
                 timeoutMs = run.request.timeoutMs,
                 model = run.request.model,
+                providerId = run.request.providerId,
                 pane = JevPane.DRAFT,
                 side = JevPane.DRAFT,
             )
@@ -596,18 +615,26 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
      * Saves the live draft, or only [questions] when given, as a preset. Saving the draft makes
      * it the open preset; saving given questions leaves the draft alone and stores no context.
      */
-    suspend fun savePreset(name: String, questions: JsonObject? = null, model: String? = null, timeoutMs: Long? = null): JevPreset {
+    suspend fun savePreset(
+        name: String,
+        questions: JsonObject? = null,
+        model: String? = null,
+        providerId: String? = null,
+        timeoutMs: Long? = null,
+    ): JevPreset {
         val repo = services.presets ?: throw JevFailure("PRESET_STORAGE_ERROR", "Preset storage is unavailable")
         val value = _state.value
         val preset = if (questions != null) {
-            JevPreset(name, "", questions.toString(), stateAsJson = false, timeoutMs ?: JevLimits.DEFAULT_TIMEOUT_MS, model ?: JevModelCatalog.DEFAULT.id)
+            JevPreset(name, "", questions.toString(), stateAsJson = false, timeoutMs ?: JevLimits.DEFAULT_TIMEOUT_MS, model ?: JevModelCatalog.DEFAULT.id, providerId)
         } else {
             val questionsText = when {
                 value.editorMode == JevEditorMode.JSON && value.jsonError != null -> throw JevFailure("INVALID_INPUT", "Fix the JSON before saving", "questions")
                 value.editorMode == JevEditorMode.JSON -> value.jsonText
                 else -> value.questions.toApi().toString()
             }
-            JevPreset(name, value.contextText, questionsText, value.contextFormat is JevContextFormat.Json, timeoutMs ?: value.timeoutMs, model ?: value.model)
+            // The resolved provider, so the preset stays unambiguous if another provider adds the same id.
+            val provider = if (model != null) providerId else value.modelOption?.providerId ?: value.providerId
+            JevPreset(name, value.contextText, questionsText, value.contextFormat is JevContextFormat.Json, timeoutMs ?: value.timeoutMs, model ?: value.model, provider)
         }
         try {
             repo.save(preset)
@@ -632,7 +659,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
                         presetName = preset.name, title = preset.name, dirty = false,
                         contextText = preset.stateText,
                         sendAsText = !preset.stateAsJson && looksLikeJson(preset.stateText),
-                        timeoutMs = preset.timeoutMs, model = preset.model, pane = JevPane.CHAT, side = JevPane.DRAFT,
+                        timeoutMs = preset.timeoutMs, model = preset.model, providerId = preset.providerId, pane = JevPane.CHAT, side = JevPane.DRAFT,
                     ).recomputed()
                 }
                 resetCompose()
@@ -667,16 +694,16 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
             put("state", request.state)
             put("questions", request.questions)
             put("timeout_ms", request.timeoutMs)
+            put("model", request.model)
+            request.providerId?.let { put("provider", it) }
         }.toString()
         val copied = services.context.clipboardProvider?.setText(text) == true
         notice(if (copied) "Copied jev_decide arguments" else "Clipboard is unavailable")
     }
 
     fun openSettings() {
-        if (!services.openAiProviderSettings()) notice("Open Secret Manager → AI Providers to add an OpenRouter key")
+        if (!services.openAiProviderSettings()) notice("Open Secret Manager → AI Providers to add a provider key")
     }
-
-    fun hasOpenRouterKey() = services.hasOpenRouterKey()
 
     fun dismissNotice(serial: Long) = update { if (noticeSerial == serial) copy(notice = null) else this }
 
@@ -725,6 +752,8 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
 
     private fun JevPlaygroundState.recomputed(): JevPlaygroundState {
         val limits = decisionService.limits
+        val catalog = decisionService.catalog
+        val option = catalog.find(model, providerId)
         val format = detectContext(contextText, sendAsText)
         val issues = mutableListOf<JevFormIssue>()
         val apiIssues = mutableListOf<JevIssue>()
@@ -753,9 +782,9 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
         }
         var request: JevRequest? = null
         if (stateElement != null && questionsJson != null) {
-            val candidate = JevRequest(stateElement, questionsJson, timeoutMs, model)
-            JevValidation.requestIssues(candidate, limits).forEach { issue ->
-                val field = if (issue.path.firstOrNull() == "model") JevField.Model
+            val candidate = JevRequest(stateElement, questionsJson, timeoutMs, model, option?.providerId ?: providerId)
+            JevValidation.requestIssues(candidate, limits, catalog).forEach { issue ->
+                val field = if (issue.path.firstOrNull() in MODEL_PATHS) JevField.Model
                 else if (editorMode == JevEditorMode.FORM) fieldFor(issue, questions)
                 else JevField.Json
                 val message = if (field == JevField.Json) "${issue.pathText}: ${issue.message}" else issue.message
@@ -767,7 +796,10 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
             }
             if (issues.isEmpty()) request = candidate
         }
-        return copy(contextFormat = format, issues = issues, apiIssues = apiIssues, request = request, placeholders = placeholders)
+        return copy(
+            contextFormat = format, issues = issues, apiIssues = apiIssues, request = request, placeholders = placeholders,
+            modelOption = option, readiness = catalog.readiness(option),
+        )
     }
 
     /** API-style path for a form-only issue; a blank ID is named by its position. */
@@ -797,5 +829,14 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
 
     companion object {
         private const val COMPOSE_MODEL_KEY = "compose/model/v1"
+        private val MODEL_PATHS = setOf("model", "provider")
+        private val SETUP_CODES = setOf(
+            JevDecisionErrors.MISSING_CREDENTIAL, JevDecisionErrors.LOCAL_UNAVAILABLE, JevDecisionErrors.GATEWAY_UNAVAILABLE,
+        )
+        /** Failures that mean the catalog's reachability is out of date. */
+        private val STALE_CATALOG_CODES = setOf(
+            JevDecisionErrors.MISSING_CREDENTIAL, JevDecisionErrors.LOCAL_UNAVAILABLE,
+            JevDecisionErrors.GATEWAY_UNAVAILABLE, "MODEL_NOT_FOUND", "AUTH_ERROR",
+        )
     }
 }

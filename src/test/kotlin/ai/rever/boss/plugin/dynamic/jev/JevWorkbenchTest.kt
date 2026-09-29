@@ -15,6 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -95,7 +96,7 @@ class JevWorkbenchTest {
             timeoutMs = 10,
             model = "local/unknown",
         )
-        val paths = JevValidation.requestIssues(request, JevLimits()).map { it.pathText }
+        val paths = JevValidation.requestIssues(request, JevLimits(), JevModelCatalog()).map { it.pathText }
         assertEquals(listOf("model", "timeout_ms", "questions.r.instructions", "questions.r.criteria.1", "questions.c.criteria"), paths)
     }
 
@@ -115,7 +116,7 @@ class JevWorkbenchTest {
 
     @Test
     fun `run log records both sources newest first and is capped`() = runTest {
-        val service = JevDecisionService(JevKeyResolver { "k" }, CapturingTransport(), JevLimits(maxRunHistory = 3))
+        val service = JevDecisionService(CapturingBackend(), limits = JevLimits(maxRunHistory = 3))
         service.decide(requestAllTypes())
         JevMcpToolProvider("p", service).call(McpToolArgs(emptyMap(), """{"state":"x","questions":${requestAllTypes().questions}}"""))
         assertEquals(listOf(JevRunSource.MCP, JevRunSource.PLAYGROUND), service.runs.value.map { it.source })
@@ -129,7 +130,7 @@ class JevWorkbenchTest {
 
     @Test
     fun `MCP errors name the failing field`() = runTest {
-        val provider = JevMcpToolProvider("p", JevDecisionService(JevKeyResolver { "k" }, CapturingTransport()))
+        val provider = JevMcpToolProvider("p", JevDecisionService(CapturingBackend()))
         val result = provider.call(McpToolArgs(emptyMap(), """{"state":"x","questions":{"q":{"type":"score","instructions":"s","criteria":["a"]}}}"""))
         assertTrue(result.isError)
         assertEquals("questions.q.criteria", error(result.text)["path"]!!.jsonPrimitive.content)
@@ -139,8 +140,8 @@ class JevWorkbenchTest {
 
     @Test
     fun `jev_validate lists every issue and never calls the provider`() = runTest {
-        val transport = CapturingTransport()
-        val provider = JevMcpToolProvider("p", JevDecisionService(JevKeyResolver { "k" }, transport))
+        val transport = CapturingBackend()
+        val provider = JevMcpToolProvider("p", JevDecisionService(transport))
         val bad = provider.validate(McpToolArgs(emptyMap(), """{"state":"x","questions":{"a":{"type":"noul","instructions":""},"b":{"type":"choice","instructions":"x","criteria":{}}}}"""))
         val body = testJson.parseToJsonElement(bad.text).jsonObject
         assertEquals(false, body["valid"]!!.jsonPrimitive.content.toBoolean())
@@ -154,8 +155,8 @@ class JevWorkbenchTest {
     fun `presets are reusable by name over MCP`() = runTest {
         val repo = JevPresetRepository(memoryBackend())
         repo.save(JevPreset("routing", "saved context", requestAllTypes().questions.toString(), timeoutMs = 7_000))
-        val transport = CapturingTransport()
-        val provider = JevMcpToolProvider("p", JevDecisionService(JevKeyResolver { "k" }, transport), repo)
+        val transport = CapturingBackend()
+        val provider = JevMcpToolProvider("p", JevDecisionService(transport), repo)
 
         val listed = testJson.parseToJsonElement(provider.listPresets(McpToolArgs(emptyMap())).text).jsonObject["presets"]!!.jsonArray.single().jsonObject
         assertEquals("routing", listed["name"]!!.jsonPrimitive.content)
@@ -163,7 +164,7 @@ class JevWorkbenchTest {
 
         val result = provider.call(McpToolArgs(emptyMap(), """{"preset":"routing","state":{"ticket":"new"}}"""))
         assertFalse(result.isError, result.text)
-        val sent = testJson.parseToJsonElement(transport.body!!.decodeToString()).jsonObject
+        val sent = testJson.parseToJsonElement(transport.body!!).jsonObject
         assertEquals(requestAllTypes().questions, sent["questions"])
         assertEquals("""{"ticket":"new"}""", sent["state"].toString())
 
@@ -183,7 +184,7 @@ class JevWorkbenchTest {
 
     @Test
     fun `form issues land on the field that caused them`() {
-        val services = JevPluginServices(context(), CapturingTransport(), JevKeyResolver { "k" })
+        val services = JevPluginServices(context(), CapturingBackend())
         val vm = services.playground
         vm.setOption(0, 1, JevOptionDraft("", "Invoices"))
         vm.editQuestion(1) { copy(id = "route") }
@@ -198,7 +199,7 @@ class JevWorkbenchTest {
 
     @Test
     fun `api issues map to fields once draft issues are fixed`() {
-        val services = JevPluginServices(context(), CapturingTransport(), JevKeyResolver { "k" })
+        val services = JevPluginServices(context(), CapturingBackend())
         val vm = services.playground
         vm.editQuestion(0) { copy(instructions = "") }
         assertEquals("Instructions must state the decision", vm.state.value.issue(JevField.Instructions(0)))
@@ -210,7 +211,7 @@ class JevWorkbenchTest {
 
     @Test
     fun `structured JSON keeps the editor in JSON`() {
-        val services = JevPluginServices(context(), CapturingTransport(), JevKeyResolver { "k" })
+        val services = JevPluginServices(context(), CapturingBackend())
         val vm = services.playground
         vm.setEditorMode(JevEditorMode.JSON)
         vm.setJsonText("""{"q":{"type":"noul","instructions":{"steps":["check impact"]}}}""")
@@ -226,7 +227,7 @@ class JevWorkbenchTest {
     @Test
     fun `a run selects its record and restoring brings inputs back`() = runTest {
         val urgentOnly = """{"model":"typesafe/jev-1.13","answers":{"urgent":{"type":"noul","noul":0.9}},"usage":{"input_tokens":1,"output_tokens":1}}"""
-        val services = JevPluginServices(context(), CapturingTransport(urgentOnly), JevKeyResolver { "k" })
+        val services = JevPluginServices(context(), CapturingBackend(urgentOnly))
         val vm = services.playground
         vm.useStarter(JevStarter.URGENCY)
         services.service.decide(vm.state.value.request!!, JevRunSource.MCP)
@@ -239,14 +240,23 @@ class JevWorkbenchTest {
     }
 
     @Test
-    fun `running without a key shows setup instead of calling`() {
-        val transport = CapturingTransport()
-        val services = JevPluginServices(context(), transport, JevKeyResolver { null })
+    fun `without an OpenRouter key the panel asks to connect and a run shows the gateway's error`() {
+        val transport = CapturingBackend().apply { failure = missingCredential() }
+        val api = FakeDecisionApi(listOf(openRouter(reachable = false), localRuntime()))
+        val services = JevPluginServices(context(), transport, decisionApiOverride = { api })
         val vm = services.playground
+        runBlocking { services.catalog.refresh() }
+        assertEquals(JevReadiness.NeedsOpenRouterKey, vm.state.value.readiness)
         vm.run()
-        assertEquals("MISSING_OPENROUTER_KEY", vm.state.value.error?.code)
+        assertEquals("MISSING_CREDENTIAL", vm.state.value.error?.code)
         assertEquals(JevPane.ANSWER, vm.state.value.pane)
+        assertEquals(listOf("OPENROUTER"), transport.providers)
         assertNull(transport.body)
+
+        // A local model is ready without any key.
+        vm.setModel("laya:en", null)
+        assertEquals(JevReadiness.Ready, vm.state.value.readiness)
+        assertEquals("LOCAL_SYSTEMONE", vm.state.value.request?.providerId)
         services.dispose()
     }
 }

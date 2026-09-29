@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.jev
 
+import ai.rever.boss.plugin.api.AiDecisionAPI
 import ai.rever.boss.plugin.api.AiGatewayAPI
 import ai.rever.boss.plugin.api.CustomPluginEvent
 import ai.rever.boss.plugin.api.PanelId
@@ -8,25 +9,22 @@ import kotlinx.coroutines.launch
 
 class JevPluginServices(
     val context: PluginContext,
-    transport: JevTransport = JdkJevTransport(),
-    /** Test seam; production resolves the key from Secret Manager → AI Providers. */
-    private val keyResolverOverride: JevKeyResolver? = null,
+    /** Test seam; production decides through the AI Gateway's [AiDecisionAPI]. */
+    backendOverride: JevDecisionBackend? = null,
     /** Test seam; production reaches chat models through the AI Gateway. */
     chatOverride: JevChatClient? = null,
     /** Test seam; production uses the host's plugin storage. */
     storageOverride: JevPresetBackend? = null,
+    /** Test seam for the catalog; production resolves the gateway per call. */
+    decisionApiOverride: (() -> AiDecisionAPI?)? = null,
 ) {
-    private val keyResolver = keyResolverOverride ?: JevKeyResolver {
-        runCatching {
-            context.llmProvider
-                ?.configuredProviders()
-                .orEmpty()
-                .firstOrNull { it.providerId.equals(OPENROUTER_PROVIDER_ID, ignoreCase = true) }
-                ?.apiKey
-                ?.takeIf(String::isNotBlank)
-        }.getOrNull()
-    }
-    val service = JevDecisionService(keyResolver = keyResolver, transport = transport)
+    private val decisionApi: () -> AiDecisionAPI? = decisionApiOverride
+        ?: { context.optionalHostValue { getPluginAPI(AiDecisionAPI::class.java) } }
+    val catalog = JevModelCatalog(decisionApi)
+    val service = JevDecisionService(
+        backend = backendOverride ?: GatewayJevDecisionBackend(decisionApi),
+        catalog = catalog,
+    )
     /** Plugin key-value storage: presets and the remembered compose model. */
     internal val storage: JevPresetBackend? = storageOverride ?: runCatching {
         context.pluginStorageFactory
@@ -37,6 +35,7 @@ class JevPluginServices(
     val chat: JevChatClient = chatOverride ?: GatewayJevChatClient(
         gateway = { context.optionalHostValue { getPluginAPI(AiGatewayAPI::class.java) } },
         llmProvider = { context.optionalHostValue { llmProvider } },
+        isDecisionModel = catalog::isDecisionModel,
     )
     val composer = JevComposer(chat, service.limits)
 
@@ -44,13 +43,6 @@ class JevPluginServices(
 
     /** One per plugin activation, so drafts survive the sidebar panel being hidden or recreated. */
     val playground: JevPlaygroundViewModel by playgroundDelegate
-
-    fun hasOpenRouterKey(): Boolean = keyResolverOverride?.let { !it.resolveOpenRouterKey().isNullOrBlank() }
-        ?: runCatching {
-            context.llmProvider?.configuredProviders().orEmpty().any {
-                it.providerId.equals(OPENROUTER_PROVIDER_ID, ignoreCase = true) && it.apiKey.isNotBlank()
-            }
-        }.getOrDefault(false)
 
     /**
      * AI providers live in the Secret Manager panel. The event selects its AI tab (also for a
@@ -80,7 +72,6 @@ class JevPluginServices(
     }
 
     companion object {
-        const val OPENROUTER_PROVIDER_ID = "OPENROUTER"
         const val OPEN_AI_EVENT = "secret-manager.open-ai"
         val SECRET_MANAGER_PANEL = PanelId("secret-manager", 24)
     }

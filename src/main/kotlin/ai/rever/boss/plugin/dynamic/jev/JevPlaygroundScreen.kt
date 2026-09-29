@@ -74,9 +74,10 @@ fun JevPlaygroundScreen(viewModel: JevPlaygroundViewModel) {
     val state by viewModel.state.collectAsState()
     val runs by viewModel.runs.collectAsState()
     val compose by viewModel.compose.collectAsState()
-    val hasKey = viewModel.hasOpenRouterKey()
     var saveDialog by remember { mutableStateOf(false) }
     val anchors = remember { JevIssueAnchors() }
+    // Local providers are probed live, so opening the panel re-reads them.
+    LaunchedEffect(Unit) { viewModel.refreshCatalog() }
 
     CompositionLocalProvider(LocalIssueAnchors provides anchors) {
         BoxWithConstraints(
@@ -93,16 +94,16 @@ fun JevPlaygroundScreen(viewModel: JevPlaygroundViewModel) {
             val twoPane = maxWidth >= TwoPaneMinWidth
             val compact = maxWidth < CompactWidth
             Column(Modifier.fillMaxSize()) {
-                Header(state, viewModel, hasKey, compact, onSaveAs = { saveDialog = true })
+                Header(state, viewModel, compact, onSaveAs = { saveDialog = true })
                 if (twoPane) {
                     // Conversation on the left; the Draft editor or the latest answer on the right.
                     Row(Modifier.fillMaxSize()) {
-                        Box(Modifier.weight(1f).fillMaxHeight()) { ChatPane(state, viewModel, hasKey) }
+                        Box(Modifier.weight(1f).fillMaxHeight()) { ChatPane(state, viewModel) }
                         Box(Modifier.width(1.dp).fillMaxHeight().background(JevTokens.Border))
                         Column(Modifier.weight(1f).fillMaxHeight()) {
                             PaneTabs(state, viewModel, listOf(JevPane.DRAFT, JevPane.ANSWER), selected = state.side)
                             Box(Modifier.fillMaxSize()) {
-                                if (state.side == JevPane.ANSWER) AnswerPane(state, runs, viewModel, hasKey) else DraftPane(state, viewModel)
+                                if (state.side == JevPane.ANSWER) AnswerPane(state, runs, viewModel) else DraftPane(state, viewModel)
                             }
                         }
                     }
@@ -110,12 +111,12 @@ fun JevPlaygroundScreen(viewModel: JevPlaygroundViewModel) {
                     PaneTabs(state, viewModel, JevPane.entries, selected = state.pane)
                     Box(Modifier.fillMaxSize()) {
                         when (state.pane) {
-                            JevPane.CHAT -> ChatPane(state, viewModel, hasKey)
+                            JevPane.CHAT -> ChatPane(state, viewModel)
                             JevPane.DRAFT -> Column(Modifier.fillMaxSize()) {
                                 Box(Modifier.weight(1f)) { DraftPane(state, viewModel) }
-                                Dock(state, compose, viewModel, hasKey, compact, showComposer = false)
+                                Dock(state, compose, viewModel, compact, showComposer = false)
                             }
-                            JevPane.ANSWER -> AnswerPane(state, runs, viewModel, hasKey)
+                            JevPane.ANSWER -> AnswerPane(state, runs, viewModel)
                         }
                     }
                 }
@@ -135,7 +136,7 @@ fun JevPlaygroundScreen(viewModel: JevPlaygroundViewModel) {
 }
 
 @Composable
-private fun Header(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel, hasKey: Boolean, compact: Boolean, onSaveAs: () -> Unit) {
+private fun Header(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel, compact: Boolean, onSaveAs: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -151,7 +152,7 @@ private fun Header(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel,
                 enabled = state.dirty || state.presetName == null,
             )
         }
-        ModelPicker(state, viewModel, hasKey, compact)
+        ModelPicker(state, viewModel, compact)
     }
     Box(Modifier.fillMaxWidth().height(1.dp).background(JevTokens.Border))
 }
@@ -209,50 +210,62 @@ private fun DocumentMenu(state: JevPlaygroundState, viewModel: JevPlaygroundView
 
 /** Status and model choice in one place: what will answer, and whether it can. */
 @Composable
-private fun ModelPicker(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel, hasKey: Boolean, compact: Boolean) {
+private fun ModelPicker(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel, compact: Boolean) {
     var open by remember { mutableStateOf(false) }
-    val model = JevModelCatalog.find(state.model) ?: JevModelCatalog.DEFAULT
-    val color = if (hasKey) JevTokens.Success else JevTokens.Warning
+    val options by viewModel.models.collectAsState()
+    val providers by viewModel.modelProviders.collectAsState()
+    val model = state.modelOption
+    val ready = model != null && state.readiness == JevReadiness.Ready
+    val color = if (ready) JevTokens.Success else JevTokens.Warning
     val label = when {
-        !hasKey -> if (compact) "Needs key" else "Needs OpenRouter key"
+        model == null -> state.model
+        state.readiness == JevReadiness.NeedsOpenRouterKey -> if (compact) "Needs key" else "Needs OpenRouter key"
+        state.readiness is JevReadiness.Unavailable -> if (compact) "Unavailable" else "${model.label} · unavailable"
         compact -> model.label
         else -> "${model.label} · ${model.providerLabel}"
     }
     Box {
         Row(
             Modifier.clip(RoundedCornerShape(12.dp))
-                .border(1.dp, if (hasKey) JevTokens.Border else JevTokens.Warning.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                .border(1.dp, if (ready) JevTokens.Border else JevTokens.Warning.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
                 .clickable { open = true }.pointerHoverIcon(PointerIcon.Hand)
                 .padding(start = 8.dp, end = 6.dp, top = 3.dp, bottom = 3.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Box(Modifier.size(7.dp).clip(CircleShape).background(color))
-            Text(label, color = if (hasKey) JevTokens.TextSecondary else JevTokens.Warning, fontSize = 12.sp, maxLines = 1)
+            Text(label, color = if (ready) JevTokens.TextSecondary else JevTokens.Warning, fontSize = 12.sp, maxLines = 1)
             Icon(Icons.Outlined.ExpandMore, contentDescription = "Choose model", tint = JevTokens.TextMuted, modifier = Modifier.size(14.dp))
         }
         if (open) {
-            JevMenu(onDismiss = { open = false }, width = 280) {
-                MenuGroup("Decision model")
-                JevModelCatalog.all.forEach { option ->
-                    MenuItem(
-                        option.label,
-                        onClick = { open = false; viewModel.setModel(option.id) },
-                        detail = option.providerLabel,
-                        selected = option.id == state.model,
-                        trailing = {
-                            if (option.id == state.model) Icon(Icons.Outlined.Check, null, tint = JevTokens.Accent, modifier = Modifier.size(14.dp))
-                            else Spacer(Modifier.size(14.dp))
-                        },
-                    )
+            JevMenu(onDismiss = { open = false }, width = 300) {
+                providers.forEach { provider ->
+                    MenuGroup(provider.label)
+                    // An unreachable provider says why: the missing key, or how to start the local runtime.
+                    if (!provider.reachable) provider.detail?.let {
+                        Text(it, color = JevTokens.Warning, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+                    }
+                    val served = options.filter { it.providerId == provider.providerId }
+                    if (served.isEmpty() && provider.reachable) {
+                        Text("No decision models", color = JevTokens.TextMuted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+                    }
+                    served.forEach { option ->
+                        val selected = model != null && option.id == model.id && option.providerId == model.providerId
+                        MenuItem(
+                            option.label,
+                            onClick = { open = false; viewModel.setModel(option.id, option.providerId) },
+                            detail = if (option.local) "on this machine" else null,
+                            selected = selected,
+                            enabled = option.reachable,
+                            trailing = {
+                                if (selected) Icon(Icons.Outlined.Check, null, tint = JevTokens.Accent, modifier = Modifier.size(14.dp))
+                                else Spacer(Modifier.size(14.dp))
+                            },
+                        )
+                    }
                 }
                 MenuDivider()
-                Text(
-                    if (hasKey) "OpenRouter key found in Secret Manager → AI Providers." else "No OpenRouter key yet. Add one and select any OpenRouter model there.",
-                    color = if (hasKey) JevTokens.TextMuted else JevTokens.Warning,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                )
+                MenuItem("Refresh models", onClick = viewModel::refreshCatalog)
                 MenuItem("Open AI Providers in Secret Manager", onClick = { open = false; viewModel.openSettings() })
             }
         }

@@ -32,19 +32,21 @@ class JevMcpToolProvider(
     private fun decisionTools(): List<McpToolDefinition> = listOf(
         McpToolDefinition(
             name = "jev_decide",
-            description = "Ask Jev (typesafe/jev-1.13 via the user's OpenRouter key) to judge `state` against questions. " +
+            description = "Ask a Jev decision model to judge `state` against questions, through the AI Gateway. " +
                 "Question types: noul = yes/no probability; choice = pick one named option; score = position on an ordered rubric. " +
                 "Pass `questions`, or `preset` to reuse a rubric saved in the Jev panel (see jev_presets). " +
-                "Each call is a paid external request. Returns assessments only and never acts on them. " +
+                "`model` defaults to typesafe/jev-1.13 on OpenRouter, a paid request; a local model from jev_models " +
+                "(such as laya:en) is free and runs on this machine. The call goes only to that model's provider, never another. " +
+                "Returns assessments only and never acts on them. " +
                 "Errors carry a `path` naming the field to fix; check first with jev_validate.",
             inputSchema = DECIDE_SCHEMA,
-            // The call does not mutate local state, but it is not read-only: it can incur provider cost.
+            // The call does not mutate local state, but it is not read-only: an OpenRouter call has a cost.
             readOnly = false,
             handler = McpToolHandler(::call),
         ),
         McpToolDefinition(
             name = "jev_validate",
-            description = "Check jev_decide arguments locally without calling OpenRouter. Free. " +
+            description = "Check jev_decide arguments locally without calling any model. Free. " +
                 "Returns every issue with its path, or valid: true.",
             inputSchema = DECIDE_SCHEMA,
             readOnly = true,
@@ -57,18 +59,31 @@ class JevMcpToolProvider(
             readOnly = true,
             handler = McpToolHandler(::listPresets),
         ),
+        McpToolDefinition(
+            name = "jev_models",
+            description = "List the decision models Jev can call, refreshed from the AI Gateway: id, provider, local, reachable, " +
+                "and detail (why a provider is unusable, or where it listens). Local models run on this machine and are free; " +
+                "OpenRouter models are paid. Pass an id as `model`, and `provider` when two providers serve the same id.",
+            inputSchema = """{"type":"object","additionalProperties":false,"properties":{}}""",
+            readOnly = true,
+            handler = McpToolHandler(::listModels),
+        ),
     )
 
     internal suspend fun call(args: McpToolArgs): McpToolResult = guarded {
         val result = service.decide(parse(args), JevRunSource.MCP)
         McpToolResult(buildJsonObject {
             put("response", result.response)
+            put("provider", result.model.providerId)
+            put("local", result.model.local)
             put("latency_ms", result.latencyMs)
         }.toString())
     }
 
     internal suspend fun validate(args: McpToolArgs): McpToolResult = guarded {
-        val issues = JevValidation.requestIssues(parse(args), service.limits)
+        val request = parse(args)
+        service.catalog.ensure(request.model, request.providerId)
+        val issues = JevValidation.requestIssues(request, service.limits, service.catalog)
         McpToolResult(buildJsonObject {
             put("valid", issues.isEmpty())
             put("issues", buildJsonArray {
@@ -88,11 +103,46 @@ class JevMcpToolProvider(
                         put("name", preset.name)
                         put("questions", questions)
                         put("model", preset.model)
+                        preset.providerId?.let { put("provider", it) }
                         put("timeout_ms", preset.timeoutMs)
                     })
                 }
             })
         }.toString())
+    }
+
+    internal suspend fun listModels(args: McpToolArgs): McpToolResult = guarded {
+        objectArgs(args, emptySet())
+        val catalog = service.catalog
+        val models = catalog.refresh()
+        McpToolResult(buildJsonObject {
+            put("default", JevModelCatalog.DEFAULT.id)
+            put("gateway_available", catalog.gatewayAvailable.value)
+            put("models", buildJsonArray {
+                models.forEach { add(modelJson(it)) }
+            })
+            put("providers", buildJsonArray {
+                catalog.providers.value.forEach { p ->
+                    add(buildJsonObject {
+                        put("provider", p.providerId)
+                        put("label", p.label)
+                        put("local", p.local)
+                        put("reachable", p.reachable)
+                        p.detail?.let { put("detail", it) }
+                    })
+                }
+            })
+        }.toString())
+    }
+
+    private fun modelJson(option: JevModelOption) = buildJsonObject {
+        put("id", option.id)
+        put("label", option.label)
+        put("provider", option.providerId)
+        put("provider_label", option.providerLabel)
+        put("local", option.local)
+        put("reachable", option.reachable)
+        option.detail?.let { put("detail", it) }
     }
 
     private fun draftTools(): List<McpToolDefinition> = listOf(
@@ -109,7 +159,7 @@ class JevMcpToolProvider(
         McpToolDefinition(
             name = "jev_draft_set",
             description = "Change the draft in the user's Jev panel. The panel updates immediately. Free; never runs. " +
-                "Pass any of state, questions, model, timeout_ms. questions uses the jev_decide shape. " +
+                "Pass any of state, questions, model, provider, timeout_ms. questions uses the jev_decide shape; models are listed by jev_models. " +
                 "mode replace (default) swaps the whole questions object; merge upserts questions by ID and keeps the rest. " +
                 "remove_questions deletes IDs after the upsert. Returns the new draft with every issue and its path; " +
                 "fix issues with another jev_draft_set before calling jev_draft_run.",
@@ -120,8 +170,9 @@ class JevMcpToolProvider(
         McpToolDefinition(
             name = "jev_draft_run",
             description = "Run the draft in the user's Jev panel exactly as its Run button does, so the answer shows in the panel " +
-                "and its history. Each call is a paid OpenRouter request; run only after jev_draft_get or jev_draft_set reports no issues. " +
-                "Returns the response and run ID, or an error with a code (INVALID_INPUT, BUSY, MISSING_OPENROUTER_KEY, TIMEOUT, ...).",
+                "and its history. An OpenRouter model is a paid request; a local model is free and runs on this machine. " +
+                "Run only after jev_draft_get or jev_draft_set reports no issues. Returns the response and run ID, or an error with a code " +
+                "(INVALID_INPUT, BUSY, MISSING_CREDENTIAL, LOCAL_UNAVAILABLE, GATEWAY_UNAVAILABLE, TIMEOUT, ...).",
             inputSchema = """{"type":"object","additionalProperties":false,"properties":{}}""",
             readOnly = false,
             handler = McpToolHandler(::draftRun),
@@ -155,7 +206,7 @@ class JevMcpToolProvider(
 
     internal suspend fun draftSet(args: McpToolArgs): McpToolResult = guarded {
         val vm = playground()
-        val root = objectArgs(args, setOf("state", "context", "questions", "mode", "remove_questions", "model", "timeout_ms"))
+        val root = objectArgs(args, setOf("state", "context", "questions", "mode", "remove_questions", "model", "provider", "timeout_ms"))
         if (root.containsKey("state") && root.containsKey("context")) {
             throw JevFailure("INVALID_INPUT", "Pass state or context, not both", "context")
         }
@@ -190,13 +241,19 @@ class JevMcpToolProvider(
             (value as? JsonArray)?.map { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content ?: throw JevFailure("INVALID_INPUT", "remove_questions must be an array of question IDs", "remove_questions") }
                 ?: throw JevFailure("INVALID_INPUT", "remove_questions must be an array of question IDs", "remove_questions")
         }.orEmpty()
+        val model = root["model"]?.let { stringArg(it, "model") }
+        val provider = root["provider"]?.let { stringArg(it, "provider") }
+        if (model != null || provider != null) {
+            service.catalog.ensure(model ?: vm.state.value.model, provider ?: if (model == null) vm.state.value.providerId else null)
+        }
         val change = JevDraftChange(
             contextText = contextText,
             sendAsText = sendAsText,
             questions = questions,
             mode = mode,
             removeQuestions = remove,
-            model = root["model"]?.let { stringArg(it, "model") },
+            model = model,
+            providerId = provider,
             timeoutMs = root["timeout_ms"]?.let { longArg(it, "timeout_ms") },
         )
         val next = vm.applyDraft(change)
@@ -216,26 +273,36 @@ class JevMcpToolProvider(
 
     internal suspend fun presetSave(args: McpToolArgs): McpToolResult = guarded {
         val vm = playground()
-        val root = objectArgs(args, setOf("name", "questions", "model", "timeout_ms"))
+        val root = objectArgs(args, setOf("name", "questions", "model", "provider", "timeout_ms"))
         val name = root["name"]?.let { stringArg(it, "name") } ?: throw JevFailure("INVALID_INPUT", "name is required", "name")
         val questions = root["questions"]?.let {
             it as? JsonObject ?: throw JevFailure("INVALID_INPUT", "questions must be an object keyed by question ID", "questions")
         }
         val model = root["model"]?.let { stringArg(it, "model") }
+        val provider = root["provider"]?.let { stringArg(it, "provider") }
+        if (provider != null && model == null) throw JevFailure("INVALID_INPUT", "Pass model with provider", "provider")
         val timeout = root["timeout_ms"]?.let { longArg(it, "timeout_ms") }
+        val catalog = service.catalog
+        if (model != null) {
+            catalog.ensure(model, provider)
+            val request = JevRequest(JsonPrimitive("preset"), questions ?: JsonObject(emptyMap()), model = model, providerId = provider)
+            JevValidation.modelIssues(request, catalog).takeIf { it.isNotEmpty() }?.let { return@guarded issuesError(it) }
+        }
         if (questions != null) {
             // A preset saved from arguments is only useful if jev_decide will accept it.
-            val issues = JevValidation.requestIssues(
-                JevRequest(JsonPrimitive("preset"), questions, timeout ?: JevLimits.DEFAULT_TIMEOUT_MS, model ?: JevModelCatalog.DEFAULT.id),
+            val issues = JevValidation.bodyIssues(
+                JevRequest(JsonPrimitive("preset"), questions, timeout ?: JevLimits.DEFAULT_TIMEOUT_MS),
                 service.limits,
             )
             if (issues.isNotEmpty()) return@guarded issuesError(issues)
         }
-        val saved = vm.savePreset(name, questions, model, timeout)
+        val resolvedProvider = model?.let { catalog.find(it, provider)?.providerId }
+        val saved = vm.savePreset(name, questions, model, resolvedProvider, timeout)
         McpToolResult(buildJsonObject {
             put("saved", saved.name)
             put("source", if (questions == null) "draft" else "questions")
             put("model", saved.model)
+            saved.providerId?.let { put("provider", it) }
             put("timeout_ms", saved.timeoutMs)
             if (questions == null) put("issues", issuesJson(vm.state.value.apiIssues))
         }.toString())
@@ -272,6 +339,8 @@ class JevMcpToolProvider(
             put("questions_text", s.jsonText)
         }
         put("model", s.model)
+        (s.modelOption?.providerId ?: s.providerId)?.let { put("provider", it) }
+        s.modelOption?.let { put("local", it.local); put("reachable", it.reachable); it.detail?.let { d -> put("model_detail", d) } }
         put("timeout_ms", s.timeoutMs)
         put("valid", s.request != null)
         put("issues", issuesJson(s.apiIssues))
@@ -281,6 +350,9 @@ class JevMcpToolProvider(
                 put("run_id", run.id)
                 put("source", run.source.name.lowercase())
                 put("at", run.at.toString())
+                put("model", run.request.model)
+                put("provider", run.providerId)
+                put("local", run.decision.model.local)
                 put("matches_draft", run.request == s.request)
                 put("summary", JevComposer.summarizeRun(run))
                 (run.decision.response["answers"] as? JsonObject)?.let { put("answers", it) }
@@ -331,7 +403,7 @@ class JevMcpToolProvider(
         }
         val root = json.parseToJsonElement(args.raw) as? JsonObject
             ?: throw JevFailure("INVALID_INPUT", "Arguments must be a JSON object")
-        val unknown = root.keys - setOf("state", "questions", "preset", "model", "timeout_ms")
+        val unknown = root.keys - setOf("state", "questions", "preset", "model", "provider", "timeout_ms")
         if (unknown.isNotEmpty()) {
             throw JevFailure("INVALID_INPUT", "Unknown arguments: ${unknown.sorted().joinToString()}", unknown.sorted().first())
         }
@@ -360,13 +432,14 @@ class JevMcpToolProvider(
                 ?: throw JevFailure("INVALID_INPUT", "timeout_ms must be an integer", "timeout_ms")
             else -> throw JevFailure("INVALID_INPUT", "timeout_ms must be an integer", "timeout_ms")
         }
-        val model = when (val value = root["model"]) {
-            null -> preset?.model ?: JevModelCatalog.DEFAULT.id
-            is JsonPrimitive -> value.takeIf { it.isString }?.content
-                ?: throw JevFailure("INVALID_INPUT", "model must be a string", "model")
-            else -> throw JevFailure("INVALID_INPUT", "model must be a string", "model")
-        }
-        return JevRequest(state, questions, timeout, model)
+        val model = root["model"]?.let { stringArg(it, "model") }
+        val provider = root["provider"]?.let { stringArg(it, "provider") }
+        // A preset's provider belongs to its model; an explicit model starts from no provider.
+        return JevRequest(
+            state, questions, timeout,
+            model = model ?: preset?.model ?: JevModelCatalog.DEFAULT.id,
+            providerId = provider ?: if (model == null) preset?.providerId else null,
+        )
     }
 
     private suspend fun guarded(block: suspend () -> McpToolResult): McpToolResult = try {
@@ -400,7 +473,8 @@ class JevMcpToolProvider(
               "questions":{"type":"object","description":"Questions keyed by snake_case ID, in the jev_decide shape: {type: noul|choice|score, instructions, criteria}"},
               "mode":{"type":"string","enum":["replace","merge"],"default":"replace","description":"replace swaps all questions; merge upserts by ID"},
               "remove_questions":{"type":"array","items":{"type":"string"},"description":"Question IDs to delete"},
-              "model":{"type":"string","enum":[${JevModelCatalog.all.joinToString(",") { "\"${it.id}\"" }}]},
+              "model":{"type":"string","description":"Decision model id from jev_models; defaults to ${JevModelCatalog.DEFAULT.id} on OpenRouter"},
+              "provider":{"type":"string","description":"Provider id from jev_models, such as OPENROUTER; needed only when two providers serve the model id"},
               "timeout_ms":{"type":"integer","minimum":1000,"maximum":120000}
             }}
         """.trimIndent()
@@ -409,7 +483,8 @@ class JevMcpToolProvider(
             {"type":"object","additionalProperties":false,"required":["name"],"properties":{
               "name":{"type":"string","minLength":1,"maxLength":80},
               "questions":{"type":"object","description":"Save these questions instead of the panel draft; no context is stored"},
-              "model":{"type":"string","enum":[${JevModelCatalog.all.joinToString(",") { "\"${it.id}\"" }}]},
+              "model":{"type":"string","description":"Decision model id from jev_models; defaults to ${JevModelCatalog.DEFAULT.id} on OpenRouter"},
+              "provider":{"type":"string","description":"Provider id from jev_models, such as OPENROUTER; needed only when two providers serve the model id"},
               "timeout_ms":{"type":"integer","minimum":1000,"maximum":120000}
             }}
         """.trimIndent()
@@ -418,7 +493,8 @@ class JevMcpToolProvider(
             {"type":"object","additionalProperties":false,"properties":{
               "state":{"description":"Decision context as a string, object, or array","oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},
               "preset":{"type":"string","description":"Name of a rubric saved in the Jev panel; use instead of questions"},
-              "model":{"type":"string","enum":[${JevModelCatalog.all.joinToString(",") { "\"${it.id}\"" }}],"default":"${JevModelCatalog.DEFAULT.id}","description":"Decision model"},
+              "model":{"type":"string","description":"Decision model id from jev_models; defaults to ${JevModelCatalog.DEFAULT.id} on OpenRouter"},
+              "provider":{"type":"string","description":"Provider id from jev_models, such as OPENROUTER; needed only when two providers serve the model id"},
               "questions":{"type":"object","minProperties":1,"maxProperties":32,"additionalProperties":{"oneOf":[
                 {"type":"object","additionalProperties":false,"properties":{"type":{"const":"noul"},"instructions":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},"criteria":{"type":"object","additionalProperties":false,"properties":{"true":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},"false":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]}}}},"required":["type","instructions"]},
                 {"type":"object","additionalProperties":false,"properties":{"type":{"const":"choice"},"instructions":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},"criteria":{"type":"object","minProperties":1,"maxProperties":255,"additionalProperties":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"},{"type":"null"}]}}},"required":["type","instructions","criteria"]},
