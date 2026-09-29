@@ -61,14 +61,47 @@ tasks.jar { enabled = false }
 tasks.processResources {
     val pluginVersion = version.toString()
     inputs.property("pluginVersion", pluginVersion)
-    // Parsed, so only the top-level version changes: a dependency's "version" is a range.
+    // Only the top-level version's value changes; a dependency's "version" is a range, and every other byte stays.
     doLast {
         val manifest = destinationDir.resolve("META-INF/boss-plugin/plugin.json")
-        @Suppress("UNCHECKED_CAST")
-        val root = groovy.json.JsonSlurper().parse(manifest) as MutableMap<String, Any?>
-        check("version" in root) { "plugin.json has no top-level version" }
-        root["version"] = pluginVersion
-        manifest.writeText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(root)) + "\n")
+        val text = manifest.readText()
+        val root = groovy.json.JsonSlurper().parseText(text) as? Map<*, *>
+        check(root?.get("version") is String) { "plugin.json needs a top-level string version" }
+        fun stringEnd(open: Int): Int {
+            var j = open + 1
+            while (text[j] != '"') j += if (text[j] == '\\') 2 else 1
+            return j
+        }
+        fun skipSpace(from: Int): Int {
+            var j = from
+            while (text[j].isWhitespace()) j++
+            return j
+        }
+        val values = mutableListOf<IntRange>()
+        var depth = 0
+        var i = 0
+        while (i < text.length) {
+            when (text[i]) {
+                '{', '[' -> depth++
+                '}', ']' -> depth--
+                '"' -> {
+                    val end = stringEnd(i)
+                    val next = skipSpace(end + 1)
+                    val key = text.substring(i + 1, end)
+                    i = end
+                    if (depth == 1 && key == "version" && text[next] == ':') {
+                        val value = skipSpace(next + 1)
+                        check(text[value] == '"') { "plugin.json top-level version must be a string" }
+                        i = stringEnd(value)
+                        values += (value + 1) until i
+                    }
+                }
+            }
+            i++
+        }
+        check(values.size == 1) { "plugin.json must have exactly one top-level version; found ${values.size}" }
+        val span = values.single()
+        manifest.writeText(text.substring(0, span.first) + pluginVersion + text.substring(span.last + 1))
     }
 }
 
