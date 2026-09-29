@@ -60,8 +60,9 @@ tasks.jar { enabled = false }
 
 tasks.processResources {
     inputs.property("pluginVersion", version)
+    // Only the top-level version: the filter is per line, and a dependency's "version" is a range.
     filesMatching("**/plugin.json") {
-        filter { it.replace(Regex("\"version\"\\s*:\\s*\"[^\"]*\""), "\"version\": \"$version\"") }
+        filter { it.replace(Regex("^  \"version\"\\s*:\\s*\"[^\"]*\""), "  \"version\": \"$version\"") }
     }
 }
 
