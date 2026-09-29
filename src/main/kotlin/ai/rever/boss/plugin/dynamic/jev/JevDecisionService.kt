@@ -45,11 +45,7 @@ class JevDecisionService(
     }
 
     private suspend fun execute(request: JevRequest): JevDecision = supervisorScope {
-        catalog.ensure(request.model, request.providerId)
-        JevValidation.request(request, limits, catalog)
-        // Exactly this provider; the gateway never falls back, and neither does Jev.
-        val model = catalog.find(request.model, request.providerId)
-            ?: throw JevFailure("INVALID_INPUT", "Unknown model '${request.model}'", "model")
+        JevValidation.bodyIssues(request, limits).firstOrNull()?.let { throw JevFailure("INVALID_INPUT", it.message, it.pathText) }
         val payload = buildJsonObject {
             put("model", request.model)
             put("state", request.state)
@@ -61,8 +57,18 @@ class JevDecisionService(
         }
         admit()
 
+        // The label for a failure before the model resolves.
+        var providerLabel = JevModelCatalog.DEFAULT.providerLabel
         val operation = async(start = CoroutineStart.LAZY) {
             withTimeoutOrNull(request.timeoutMs) {
+                ensureOpen()
+                // An unknown id refreshes before it is rejected, admitted and under the deadline.
+                catalog.ensure(request.model, request.providerId)
+                JevValidation.modelIssues(request, catalog).firstOrNull()?.let { throw JevFailure("INVALID_INPUT", it.message, it.pathText) }
+                // Exactly this provider; the gateway never falls back, and neither does Jev.
+                val model = catalog.find(request.model, request.providerId)
+                    ?: throw JevFailure("INVALID_INPUT", "Unknown model '${request.model}'", "model")
+                providerLabel = model.providerLabel
                 permits.withPermit {
                     ensureOpen()
                     val started = System.nanoTime()
@@ -105,16 +111,18 @@ class JevDecisionService(
         } catch (failure: JevFailure) {
             throw failure
         } catch (_: Exception) {
-            throw JevFailure(JevDecisionErrors.UPSTREAM_ERROR, "${model.providerLabel} could not complete the request")
+            throw JevFailure(JevDecisionErrors.UPSTREAM_ERROR, "$providerLabel could not complete the request")
         }
     }
 
+    /** Also closes [catalog]: nothing refreshes once Jev is unloading. */
     fun close() {
         val pending = synchronized(lifecycleLock) {
             if (closed) return
             closed = true
             operations.toList()
         }
+        catalog.close()
         pending.forEach { it.cancel(ServiceClosedCancellation()) }
         _runs.value = emptyList()
     }

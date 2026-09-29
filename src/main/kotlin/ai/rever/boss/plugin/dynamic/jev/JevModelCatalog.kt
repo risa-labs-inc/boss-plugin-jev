@@ -3,11 +3,10 @@ package ai.rever.boss.plugin.dynamic.jev
 import ai.rever.boss.plugin.api.AiDecisionAPI
 import ai.rever.boss.plugin.api.AiDecisionProvider
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 /** A gateway provider as the last refresh saw it. */
 data class JevProviderStatus(
@@ -39,7 +38,10 @@ sealed interface JevReadiness {
  * a call to an unreachable model still goes to the gateway, whose error is the truth.
  */
 class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
-    private val lock = Mutex()
+    private val gate = Any()
+    /** Completes true when the in-flight refresh published, false when its caller was cancelled first. */
+    private var inFlight: CompletableDeferred<Boolean>? = null
+    private var closed = false
     private val _options = MutableStateFlow(listOf(DEFAULT))
     private val _providers = MutableStateFlow(emptyList<JevProviderStatus>())
     private val _gatewayAvailable = MutableStateFlow(true)
@@ -52,7 +54,39 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
     /** False once a refresh finds no AI Gateway decision API. */
     val gatewayAvailable: StateFlow<Boolean> = _gatewayAvailable.asStateFlow()
 
-    suspend fun refresh(): List<JevModelOption> = lock.withLock {
+    /**
+     * Concurrent callers share one in-flight probe. It runs in the first caller's coroutine, so
+     * that caller's timeout and cancellation bound it; after [close] nothing is probed.
+     */
+    suspend fun refresh(): List<JevModelOption> {
+        while (true) {
+            val (shared, leader) = synchronized(gate) {
+                if (closed) return _options.value
+                val running = inFlight
+                if (running != null) running to false else CompletableDeferred<Boolean>().also { inFlight = it } to true
+            }
+            if (!leader) {
+                if (shared.await()) return _options.value
+                continue
+            }
+            var published = false
+            try {
+                probe()
+                published = true
+                return _options.value
+            } finally {
+                synchronized(gate) { if (inFlight === shared) inFlight = null }
+                shared.complete(published)
+            }
+        }
+    }
+
+    /** No refresh starts after this; one already running finishes with its caller. */
+    fun close() {
+        synchronized(gate) { closed = true }
+    }
+
+    private suspend fun probe() {
         val gateway = runCatching { api() }.getOrNull()
         val listed: List<AiDecisionProvider>? = gateway?.let {
             try {
@@ -64,13 +98,13 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
                 null
             }
         }
+        // Only one probe runs at a time, so publishing needs no lock.
         when {
             gateway == null -> publish(listOf(DEFAULT.copy(reachable = false, detail = GATEWAY_HINT)), emptyList(), gateway = false)
             listed == null -> publish(listOf(DEFAULT.copy(reachable = false, detail = LIST_FAILED)), emptyList(), gateway = true)
             else -> publish(merge(listed, _options.value), listed.map(::status), gateway = true)
         }
         refreshed = true
-        _options.value
     }
 
     /** Refreshes when [model] is not known yet, so a model pulled since the last refresh is accepted. */
@@ -79,7 +113,7 @@ class JevModelCatalog(private val api: () -> AiDecisionAPI? = { null }) {
         if (found is JevModelLookup.Unknown) refresh()
     }
 
-    /** Refreshes once per activation; later refreshes are explicit. */
+    /** Refreshes once per activation, joining one already in flight; later refreshes are explicit. */
     suspend fun ensureLoaded() {
         if (!refreshed) refresh()
     }
