@@ -58,7 +58,7 @@ class JevProviderNavigationTest {
         val bus = RecordingBus()
         val panels = RecordingPanels()
         val settings = RecordingSettings()
-        val services = JevPluginServices(context(bus = bus, panels = panels, settings = settings), CapturingTransport(), JevKeyResolver { null })
+        val services = JevPluginServices(context(bus = bus, panels = panels, settings = settings), CapturingBackend())
 
         assertTrue(services.openAiProviderSettings())
 
@@ -73,22 +73,22 @@ class JevProviderNavigationTest {
     @Test
     fun `either channel alone is enough`() {
         val bus = RecordingBus()
-        assertTrue(JevPluginServices(context(bus = bus), CapturingTransport(), JevKeyResolver { null }).openAiProviderSettings())
+        assertTrue(JevPluginServices(context(bus = bus), CapturingBackend()).openAiProviderSettings())
         assertEquals(1, bus.published.size)
 
         val panels = RecordingPanels()
-        assertTrue(JevPluginServices(context(panels = panels), CapturingTransport(), JevKeyResolver { null }).openAiProviderSettings())
+        assertTrue(JevPluginServices(context(panels = panels), CapturingBackend()).openAiProviderSettings())
         assertEquals(1, panels.opened.size)
     }
 
     @Test
     fun `Settings is the fallback only when neither channel exists`() {
         val settings = RecordingSettings()
-        assertTrue(JevPluginServices(context(settings = settings), CapturingTransport(), JevKeyResolver { null }).openAiProviderSettings())
+        assertTrue(JevPluginServices(context(settings = settings), CapturingBackend()).openAiProviderSettings())
         assertEquals(listOf("LLM_PROVIDERS"), settings.sections)
 
-        assertFalse(JevPluginServices(context(), CapturingTransport(), JevKeyResolver { null }).openAiProviderSettings())
-        assertFalse(JevPluginServices(context(window = null, bus = RecordingBus()), CapturingTransport(), JevKeyResolver { null }).openAiProviderSettings())
+        assertFalse(JevPluginServices(context(), CapturingBackend()).openAiProviderSettings())
+        assertFalse(JevPluginServices(context(window = null, bus = RecordingBus()), CapturingBackend()).openAiProviderSettings())
     }
 
     @Test
@@ -102,7 +102,7 @@ class JevProviderNavigationTest {
             override val applicationEventBus: ApplicationEventBus? get() = throw NoSuchMethodError("old host")
             override val panelEventProvider: PanelEventProvider? get() = panels
         }
-        assertTrue(JevPluginServices(ctx, CapturingTransport(), JevKeyResolver { null }).openAiProviderSettings())
+        assertTrue(JevPluginServices(ctx, CapturingBackend()).openAiProviderSettings())
         assertEquals("w2", panels.opened.single().second)
     }
 }

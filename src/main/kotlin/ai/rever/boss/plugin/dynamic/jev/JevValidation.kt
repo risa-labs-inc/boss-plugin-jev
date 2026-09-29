@@ -13,18 +13,35 @@ import kotlinx.serialization.json.jsonObject
 
 internal object JevValidation {
     /** Throws the first issue so callers that need one failure keep a stable code. */
-    fun request(request: JevRequest, limits: JevLimits) {
-        requestIssues(request, limits).firstOrNull()?.let { throw JevFailure("INVALID_INPUT", it.message, it.pathText) }
+    fun request(request: JevRequest, limits: JevLimits, catalog: JevModelCatalog) {
+        requestIssues(request, limits, catalog).firstOrNull()?.let { throw JevFailure("INVALID_INPUT", it.message, it.pathText) }
     }
 
-    /** Every request problem, each with the path of the field that caused it. */
-    fun requestIssues(request: JevRequest, limits: JevLimits): List<JevIssue> {
+    /** Every request problem, each with its path; body first, in the order jev_decide reports them. */
+    fun requestIssues(request: JevRequest, limits: JevLimits, catalog: JevModelCatalog): List<JevIssue> =
+        bodyIssues(request, limits) + modelIssues(request, catalog)
+
+    /** The model must resolve through [JevModelCatalog.resolveChange] to a provider that lists it. */
+    fun modelIssues(request: JevRequest, catalog: JevModelCatalog): List<JevIssue> {
+        val provider = try {
+            catalog.resolveChange(request.current, request.model, request.providerId)
+        } catch (refused: JevFailure) {
+            // Cold and unbound: nothing is stored or sent until it resolves on the loaded catalog.
+            if (catalog.refreshed || request.current != null) return listOf(JevIssue(listOfNotNull(refused.path), refused.message))
+            null
+        }
+        return when (val found = catalog.lookup(request.model, provider)) {
+            is JevModelLookup.Found -> emptyList()
+            is JevModelLookup.Unknown -> listOf(JevIssue(listOf(found.path), found.message))
+            is JevModelLookup.Ambiguous -> listOf(JevIssue(listOf("provider"), JevModelCatalog.ambiguous(found)))
+        }
+    }
+
+    /** Everything but the model: timeout, state, and questions. */
+    fun bodyIssues(request: JevRequest, limits: JevLimits): List<JevIssue> {
         val issues = mutableListOf<JevIssue>()
         fun add(message: String, vararg path: String) { issues += JevIssue(path.toList(), message) }
 
-        if (JevModelCatalog.find(request.model) == null) {
-            add("Unknown model '${request.model}'; available: ${JevModelCatalog.all.joinToString { it.id }}", "model")
-        }
         if (request.timeoutMs !in limits.minTimeoutMs..limits.maxTimeoutMs) {
             add("Timeout must be between ${limits.minTimeoutMs} and ${limits.maxTimeoutMs} ms", "timeout_ms")
         }

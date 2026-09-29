@@ -47,7 +47,7 @@ class JevDraftToolsTest {
     }
 
     private class Fixture(val chat: ScriptedChat = ScriptedChat(), key: String? = "k") {
-        val transport = CapturingTransport()
+        val transport = CapturingBackend().apply { if (key == null) failure = missingCredential() }
         val storage = Memory()
         val services = JevPluginServices(
             object : PluginContext {
@@ -55,7 +55,7 @@ class JevDraftToolsTest {
                 override val tabRegistry = TabRegistry()
                 override val pluginScope = CoroutineScope(SupervisorJob())
             },
-            transport, JevKeyResolver { key }, chat, storage,
+            transport, chat, storage,
         )
         val vm get() = services.playground
         val mcp = JevMcpToolProvider("p", services.service, services.presets) { services.playground }
@@ -127,11 +127,11 @@ class JevDraftToolsTest {
     fun `draft tools are listed only with a panel and decision tools are unchanged`() {
         val f = Fixture()
         assertEquals(
-            listOf("jev_decide", "jev_validate", "jev_presets", "jev_draft_get", "jev_draft_set", "jev_draft_run", "jev_preset_save", "jev_compose"),
+            listOf("jev_decide", "jev_validate", "jev_presets", "jev_models", "jev_draft_get", "jev_draft_set", "jev_draft_run", "jev_preset_save", "jev_compose"),
             f.mcp.tools().map { it.name },
         )
         assertEquals(listOf(true, false, false, false), f.mcp.tools().filter { it.name in setOf("jev_draft_get", "jev_draft_set", "jev_draft_run", "jev_compose") }.map { it.readOnly })
-        assertEquals(listOf("jev_decide", "jev_validate", "jev_presets"), JevMcpToolProvider("p", f.services.service).tools().map { it.name })
+        assertEquals(listOf("jev_decide", "jev_validate", "jev_presets", "jev_models"), JevMcpToolProvider("p", f.services.service).tools().map { it.name })
     }
 
     @Test
@@ -196,14 +196,15 @@ class JevDraftToolsTest {
     }
 
     @Test
-    fun `draft_run refuses an invalid draft or a missing key without calling the provider`() = runTest {
+    fun `draft_run refuses an invalid draft locally and reports a missing credential from the gateway`() = runTest {
         val f = Fixture()
         f.mcp.draftSet(args("""{"state":""}"""))
         assertEquals("INVALID_INPUT", body(f.mcp.draftRun(args("{}")).text)["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
+        assertTrue(f.transport.providers.isEmpty())
 
         val noKey = Fixture(key = null)
-        assertEquals("MISSING_OPENROUTER_KEY", body(noKey.mcp.draftRun(args("{}")).text)["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
-        assertNull(f.transport.body)
+        assertEquals("MISSING_CREDENTIAL", body(noKey.mcp.draftRun(args("{}")).text)["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
+        assertEquals(listOf("OPENROUTER"), noKey.transport.providers)
         assertNull(noKey.transport.body)
     }
 
@@ -292,7 +293,7 @@ class JevDraftToolsTest {
         assertEquals("a1", f.vm.compose.value.model?.modelId)
         f.vm.setComposeModel(models[1])
 
-        val again = JevPluginServices(context(), CapturingTransport(), JevKeyResolver { "k" }, ScriptedChat(models = models), f.storage)
+        val again = JevPluginServices(context(), CapturingBackend(), ScriptedChat(models = models), f.storage)
         again.playground.refreshModels()
         assertEquals("b1", again.playground.compose.value.model?.modelId)
     }

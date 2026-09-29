@@ -1,0 +1,1 @@
+{"model":"laya:multilingual","answers":{"urgency":{"type":"score","score":1.6173,"confidence":0.4397,"legend":{"0":"Can wait for the next release","1":"Should be fixed this week","2":"Blocking revenue right now"},"probabilities":{"0":0.0092,"1":0.3643,"2":0.6265}}},"usage":{"input_tokens":74,"output_tokens":0}}

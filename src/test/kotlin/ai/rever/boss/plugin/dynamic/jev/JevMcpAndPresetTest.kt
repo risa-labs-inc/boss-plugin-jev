@@ -70,7 +70,7 @@ class JevMcpAndPresetTest {
         services.dispose()
         Dispatchers.resetMain()
 
-        val service = JevDecisionService(JevKeyResolver { "key" }, CapturingTransport())
+        val service = JevDecisionService(CapturingBackend())
         val testProvider = JevMcpToolProvider("plugin", service)
         val raw = """{"state":{"ticket":"login outage"},"questions":${requestAllTypes().questions},"timeout_ms":5000}"""
         val result = testProvider.call(McpToolArgs(emptyMap(), raw))
@@ -83,11 +83,11 @@ class JevMcpAndPresetTest {
     fun `MCP parses nested raw JSON and returns stable safe errors`() = runTest {
         val provider = JevMcpToolProvider(
             "plugin",
-            JevDecisionService(JevKeyResolver { null }, CapturingTransport()),
+            JevDecisionService(CapturingBackend().apply { failure = missingCredential() }),
         )
         val missing = provider.call(McpToolArgs(emptyMap(), """{"state":"x","questions":{"q":{"type":"noul","instructions":"decide"}}}"""))
         assertTrue(missing.isError)
-        assertEquals("MISSING_OPENROUTER_KEY", testJson.parseToJsonElement(missing.text).jsonObject["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
+        assertEquals("MISSING_CREDENTIAL", testJson.parseToJsonElement(missing.text).jsonObject["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
 
         val malformed = provider.call(McpToolArgs(emptyMap(), "{"))
         assertTrue(malformed.isError)

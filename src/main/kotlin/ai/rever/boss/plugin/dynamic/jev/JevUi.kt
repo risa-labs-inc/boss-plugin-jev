@@ -275,14 +275,17 @@ internal fun MenuItem(
     onClick: () -> Unit,
     detail: String? = null,
     selected: Boolean = false,
+    enabled: Boolean = true,
     trailing: (@Composable () -> Unit)? = null,
 ) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).pointerHoverIcon(PointerIcon.Hand).padding(horizontal = 12.dp, vertical = 6.dp),
+        Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick)
+            .then(if (enabled) Modifier.pointerHoverIcon(PointerIcon.Hand) else Modifier)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(text, color = JevTokens.Text, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+        Text(text, color = if (enabled) JevTokens.Text else JevTokens.TextMuted, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
         detail?.let { Text(it, color = JevTokens.TextMuted, fontSize = 11.sp, maxLines = 1) }
         trailing?.invoke()

@@ -17,6 +17,8 @@ data class JevPreset(
     val stateAsJson: Boolean = true,
     val timeoutMs: Long = JevLimits.DEFAULT_TIMEOUT_MS,
     val model: String = JevModelCatalog.DEFAULT.id,
+    /** Null infers the provider from the model id. */
+    val providerId: String? = null,
 )
 
 interface JevPresetBackend {
@@ -83,6 +85,7 @@ class JevPresetRepository(private val backend: JevPresetBackend) {
                     ?: throw JevFailure("PRESET_STORAGE_ERROR", "Saved presets are invalid"),
                 // Presets saved before model choice existed have no model field.
                 model = obj.string("model") ?: JevModelCatalog.DEFAULT.id,
+                providerId = obj.string("provider"),
             )
         }
     }
@@ -97,6 +100,7 @@ class JevPresetRepository(private val backend: JevPresetBackend) {
                     put("state_as_json", preset.stateAsJson)
                     put("timeout_ms", preset.timeoutMs)
                     put("model", preset.model)
+                    preset.providerId?.let { put("provider", it) }
                 })
             }
         }.toString()

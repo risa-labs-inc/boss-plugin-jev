@@ -1,0 +1,1 @@
+{"model":"laya:multilingual","state":{"customer_tier":"enterprise","ticket":"My checkout page shows a blank screen after I click Pay. I have tried two browsers."},"questions":{"urgency":{"type":"score","instructions":"How urgent is this ticket?","criteria":["Can wait for the next release","Should be fixed this week","Blocking revenue right now"]}}}

@@ -75,6 +75,9 @@ class JevVisualRenderTest {
         }
     }
 
+    /** Reachable providers, so the renders show a model that can run. */
+    private val gateway = FakeDecisionApi(listOf(openRouter(), localRuntime()))
+
     private fun context() = object : PluginContext {
         override val panelRegistry = PanelRegistry()
         override val tabRegistry = TabRegistry()
@@ -87,7 +90,8 @@ class JevVisualRenderTest {
         val broken = firstReply.replace(""""criteria":["Cosmetic","Degraded","Blocked for some users","Blocked for everyone"]""", """"criteria":["Blocked"]""")
             .replace(""""route":{"type":"choice"""", """"Route":{"type":"choice"""")
         val chat = GatedChat(broken, firstReply)
-        val services = JevPluginServices(context(), CapturingTransport(composedResponse), JevKeyResolver { "test-key" }, chat)
+        val services = JevPluginServices(context(), CapturingBackend(composedResponse), chat, decisionApiOverride = { gateway })
+        runBlocking { services.catalog.refresh() }
         val vm = services.playground
         try {
             // Empty: one prominent input, examples, templates.
@@ -169,8 +173,9 @@ class JevVisualRenderTest {
     @Test
     fun `renders the draft editor and answer at sidebar widths`() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
-        val transport = CapturingTransport(starterResponse)
-        val services = JevPluginServices(context(), transport, JevKeyResolver { "test-key" })
+        val transport = CapturingBackend(starterResponse)
+        val services = JevPluginServices(context(), transport, decisionApiOverride = { gateway })
+        runBlocking { services.catalog.refresh() }
         val viewModel = services.playground
         try {
             val request = viewModel.state.value.request!!

@@ -9,29 +9,38 @@ data class JevRequest(
     val questions: JsonObject,
     val timeoutMs: Long = JevLimits.DEFAULT_TIMEOUT_MS,
     val model: String = JevModelCatalog.DEFAULT.id,
+    /** Explicit; null resolves [model] through [JevModelCatalog.resolveChange]. */
+    val providerId: String? = null,
+    /** The preset's model and provider; the preset's own [model] keeps that provider. */
+    val current: JevBinding? = null,
 )
 
-/** A decision model the user can pick. [providerId] names the backend that serves it. */
+/**
+ * A draft's or preset's chosen model and the provider it is bound to. A null [providerId] is a
+ * preset saved before providers were stored; it is resolved on use.
+ */
+data class JevBinding(val model: String, val providerId: String?)
+
+/** A decision model the user can pick. [providerId] names the gateway provider that serves it. */
 data class JevModelOption(
     val id: String,
     val label: String,
     val providerId: String,
     val providerLabel: String,
+    /** Served on this machine, so the request never leaves it. */
+    val local: Boolean = false,
+    val reachable: Boolean = true,
+    /** Why the provider is unusable, or where it listens. */
+    val detail: String? = null,
+    /** The provider is unusable only because no credential is configured. */
+    val needsCredential: Boolean = false,
 )
-
-/**
- * Models Jev can call. Only OpenRouter's jev-1.13 is served today; local and other
- * decision models join this list once the service can route to their backend.
- */
-object JevModelCatalog {
-    val DEFAULT = JevModelOption("typesafe/jev-1.13", "jev-1.13", JevPluginServices.OPENROUTER_PROVIDER_ID, "OpenRouter")
-    val all: List<JevModelOption> = listOf(DEFAULT)
-    fun find(id: String): JevModelOption? = all.firstOrNull { it.id == id }
-}
 
 data class JevDecision(
     val response: JsonObject,
     val latencyMs: Long,
+    /** The model that answered, as the catalog had it at call time. */
+    val model: JevModelOption,
 )
 
 enum class JevRunSource { PLAYGROUND, MCP }
@@ -41,9 +50,12 @@ data class JevRunRecord(
     val id: Long,
     val at: Instant,
     val source: JevRunSource,
+    /** Carries the resolved providerId. */
     val request: JevRequest,
     val decision: JevDecision,
-)
+) {
+    val providerId: String get() = decision.model.providerId
+}
 
 data class JevLimits(
     val maxRequestBytes: Int = 256 * 1024,
@@ -70,13 +82,3 @@ class JevFailure(
     override val message: String,
     val path: String? = null,
 ) : Exception(message)
-
-fun interface JevKeyResolver {
-    /** Return the credential only. Implementations must never retain or log it. */
-    fun resolveOpenRouterKey(): String?
-}
-
-interface JevTransport {
-    suspend fun post(body: ByteArray, bearerToken: String, timeoutMs: Long, maxResponseBytes: Int): ByteArray
-    fun cancelAll() {}
-}

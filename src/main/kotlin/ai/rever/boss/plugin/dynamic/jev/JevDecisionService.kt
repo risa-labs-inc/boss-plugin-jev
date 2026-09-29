@@ -1,6 +1,5 @@
 package ai.rever.boss.plugin.dynamic.jev
 
-import java.net.http.HttpTimeoutException
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -21,8 +20,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 class JevDecisionService(
-    private val keyResolver: JevKeyResolver,
-    private val transport: JevTransport = JdkJevTransport(),
+    private val backend: JevDecisionBackend,
+    val catalog: JevModelCatalog = JevModelCatalog(),
     val limits: JevLimits = JevLimits(),
 ) {
     private val json = Json { ignoreUnknownKeys = false }
@@ -39,44 +38,51 @@ class JevDecisionService(
 
     suspend fun decide(request: JevRequest, source: JevRunSource = JevRunSource.PLAYGROUND): JevDecision {
         val decision = execute(request)
-        val record = JevRunRecord(runIds.incrementAndGet(), Instant.now(), source, request, decision)
+        val resolved = request.copy(providerId = decision.model.providerId, current = null)
+        val record = JevRunRecord(runIds.incrementAndGet(), Instant.now(), source, resolved, decision)
         _runs.update { (listOf(record) + it).take(limits.maxRunHistory) }
         return decision
     }
 
     private suspend fun execute(request: JevRequest): JevDecision = supervisorScope {
-        JevValidation.request(request, limits)
+        JevValidation.bodyIssues(request, limits).firstOrNull()?.let { throw JevFailure("INVALID_INPUT", it.message, it.pathText) }
         val payload = buildJsonObject {
             put("model", request.model)
             put("state", request.state)
             put("questions", request.questions)
         }
-        val bytes = payload.toString().encodeToByteArray()
-        if (bytes.size > limits.maxRequestBytes) {
+        val body = payload.toString()
+        if (body.encodeToByteArray().size > limits.maxRequestBytes) {
             throw JevFailure("INPUT_TOO_LARGE", "Request exceeds plugin limit ${limits.maxRequestBytes} bytes")
         }
         admit()
 
+        // The label for a failure before the model resolves.
+        var providerLabel = JevModelCatalog.DEFAULT.providerLabel
         val operation = async(start = CoroutineStart.LAZY) {
             withTimeoutOrNull(request.timeoutMs) {
+                ensureOpen()
+                // Loads a cold catalog, and refreshes for an unknown id, admitted and under the deadline.
+                catalog.ensure(request.current, request.model, request.providerId)
+                JevValidation.modelIssues(request, catalog).firstOrNull()?.let { throw JevFailure("INVALID_INPUT", it.message, it.pathText) }
+                // Exactly this provider; the gateway never falls back, and neither does Jev.
+                val model = catalog.find(request.model, catalog.resolveChange(request.current, request.model, request.providerId))
+                    ?: throw JevFailure("INVALID_INPUT", "Unknown model '${request.model}'", "model")
+                providerLabel = model.providerLabel
                 permits.withPermit {
                     ensureOpen()
-                    val key = keyResolver.resolveOpenRouterKey()?.takeIf { it.isNotBlank() }
-                        ?: throw JevFailure(
-                            "MISSING_OPENROUTER_KEY",
-                            "Configure an OpenRouter key and select any model in Secret Manager → AI Providers",
-                        )
                     val started = System.nanoTime()
-                    transport.post(bytes, key, request.timeoutMs, limits.maxResponseBytes)
-                        .let { raw ->
-                            val parsed = try {
-                                json.parseToJsonElement(raw.decodeToString()) as? JsonObject
-                            } catch (_: Exception) {
-                                null
-                            } ?: throw JevFailure("MALFORMED_RESPONSE", "OpenRouter returned invalid JSON")
-                            JevValidation.response(parsed, request.questions)
-                            JevDecision(parsed, (System.nanoTime() - started) / 1_000_000)
-                        }
+                    val raw = backend.decide(model, body, request.timeoutMs, limits.maxResponseBytes)
+                    if (raw.encodeToByteArray().size > limits.maxResponseBytes) {
+                        throw JevFailure("RESPONSE_TOO_LARGE", "Response exceeds plugin limit ${limits.maxResponseBytes} bytes")
+                    }
+                    val parsed = try {
+                        json.parseToJsonElement(raw) as? JsonObject
+                    } catch (_: Exception) {
+                        null
+                    } ?: throw JevFailure("MALFORMED_RESPONSE", "${model.providerLabel} returned invalid JSON")
+                    JevValidation.response(parsed, request.questions)
+                    JevDecision(parsed, (System.nanoTime() - started) / 1_000_000, model)
                 }
             } ?: throw JevFailure("TIMEOUT", "Jev request timed out")
         }
@@ -104,21 +110,48 @@ class JevDecisionService(
             throw cancelled
         } catch (failure: JevFailure) {
             throw failure
-        } catch (_: HttpTimeoutException) {
-            throw JevFailure("TIMEOUT", "Jev request timed out")
         } catch (_: Exception) {
-            throw JevFailure("NETWORK_ERROR", "Could not reach OpenRouter")
+            throw JevFailure(JevDecisionErrors.UPSTREAM_ERROR, "$providerLabel could not complete the request")
         }
     }
 
+    /**
+     * The catalog load for every caller that does not decide: admitted like [decide] (BUSY when
+     * full) and bounded by [timeoutMs]. With [model], also refreshes when the change does not
+     * resolve yet; [refresh] always re-reads. Returns false when the load did not finish in time;
+     * the catalog is then as it was.
+     */
+    suspend fun loadCatalog(
+        timeoutMs: Long,
+        model: String? = null,
+        providerId: String? = null,
+        current: JevBinding? = null,
+        refresh: Boolean = false,
+    ): Boolean {
+        admit()
+        try {
+            return withTimeoutOrNull(timeoutMs.coerceIn(limits.minTimeoutMs, limits.maxTimeoutMs)) {
+                ensureOpen()
+                when {
+                    refresh -> catalog.refresh()
+                    model == null -> catalog.ensureLoaded()
+                    else -> catalog.ensure(current, model, providerId)
+                }
+            } != null
+        } finally {
+            synchronized(lifecycleLock) { admitted-- }
+        }
+    }
+
+    /** Also closes [catalog]: nothing refreshes once Jev is unloading. */
     fun close() {
         val pending = synchronized(lifecycleLock) {
             if (closed) return
             closed = true
             operations.toList()
         }
+        catalog.close()
         pending.forEach { it.cancel(ServiceClosedCancellation()) }
-        transport.cancelAll()
         _runs.value = emptyList()
     }
 
@@ -135,8 +168,4 @@ class JevDecisionService(
     }
 
     private class ServiceClosedCancellation : CancellationException("Jev is unloading")
-
-    companion object {
-        val DEFAULT_MODEL: String get() = JevModelCatalog.DEFAULT.id
-    }
 }

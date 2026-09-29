@@ -1,0 +1,1 @@
+{"model":"laya:multilingual","answers":{"team":{"type":"choice","choice":"payments","confidence":0.9865,"probabilities":{"payments":0.991,"frontend":0.009,"account":0.0001}}},"usage":{"input_tokens":80,"output_tokens":0}}
