@@ -72,7 +72,7 @@ class JevCatalogRefreshTest {
     fun `concurrent ensures of an unknown model share one refresh`() = runTest {
         val api = FakeDecisionApi(listOf(openRouter(), localRuntime())).apply { gate = CompletableDeferred() }
         val catalog = JevModelCatalog { api }
-        val callers = List(5) { async { catalog.ensure("laya:en", null) } }
+        val callers = List(5) { async { catalog.ensure(null, "laya:en", null) } }
         runCurrent()
         assertEquals(1, api.listings)
         api.gate!!.complete(Unit)
@@ -117,7 +117,7 @@ class JevCatalogRefreshTest {
         val service = JevDecisionService(CapturingBackend(), catalog)
         service.close()
         catalog.refresh()
-        catalog.ensure("laya:en", null)
+        catalog.ensure(null, "laya:en", null)
         catalog.ensureLoaded()
         val failure = runCatching { service.decide(requestAllTypes().copy(model = "laya:en")) }.exceptionOrNull()
         assertEquals("SERVICE_UNAVAILABLE", (failure as JevFailure).code)

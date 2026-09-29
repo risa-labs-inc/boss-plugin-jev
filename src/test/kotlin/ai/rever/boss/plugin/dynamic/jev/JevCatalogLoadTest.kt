@@ -77,6 +77,7 @@ class JevCatalogLoadTest {
             "jev_draft_set" to { mcp.draftSet(McpToolArgs(emptyMap(), """{"state":"more PHI","timeout_ms":1000}""")) },
             "jev_draft_run" to { mcp.draftRun(McpToolArgs(emptyMap(), "{}")) },
             "jev_preset_save" to { mcp.presetSave(McpToolArgs(emptyMap(), """{"name":"x","timeout_ms":1000}""")) },
+            "jev_models" to { mcp.listModels(McpToolArgs(emptyMap(), """{"timeout_ms":1000}""")) },
         )
         val outcomes = calls.associate { (name, call) ->
             val (result, ms) = timed(call)
@@ -87,7 +88,7 @@ class JevCatalogLoadTest {
         assertEquals("TIMEOUT", outcomes.getValue("jev_decide").code())
         assertEquals("TIMEOUT", outcomes.getValue("jev_draft_run").code())
         assertEquals("TIMEOUT", outcomes.getValue("jev_preset_save").code())
-        for (name in listOf("jev_validate", "jev_draft_get", "jev_draft_set")) {
+        for (name in listOf("jev_validate", "jev_draft_get", "jev_draft_set", "jev_models")) {
             val body = outcomes.getValue(name)
             assertFalse(body.isError, "$name: ${body.text}")
             assertTrue("note" in body.json(), "$name: ${body.text}")

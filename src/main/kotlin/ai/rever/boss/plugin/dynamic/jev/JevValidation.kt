@@ -21,18 +21,19 @@ internal object JevValidation {
     fun requestIssues(request: JevRequest, limits: JevLimits, catalog: JevModelCatalog): List<JevIssue> =
         bodyIssues(request, limits) + modelIssues(request, catalog)
 
-    /** The model must be in the catalog, on the pinned provider if any; an id several providers serve must name one. */
+    /** The model must resolve through [JevModelCatalog.resolveChange] to a provider that lists it. */
     fun modelIssues(request: JevRequest, catalog: JevModelCatalog): List<JevIssue> {
-        val pin = request.pinnedProviderId?.takeIf { request.providerId == null }
-        pin?.let { catalog.pinIssue(request.model, it) }?.let { return listOf(it) }
-        val resolved = request.resolved()
-        return when (val found = catalog.lookup(resolved.model, resolved.providerId)) {
+        val provider = try {
+            catalog.resolveChange(request.current, request.model, request.providerId)
+        } catch (refused: JevFailure) {
+            // Cold and unpinned: nothing is stored or sent until it resolves on the loaded catalog.
+            if (catalog.refreshed || request.current != null) return listOf(JevIssue(listOfNotNull(refused.path), refused.message))
+            null
+        }
+        return when (val found = catalog.lookup(request.model, provider)) {
             is JevModelLookup.Found -> emptyList()
             is JevModelLookup.Unknown -> listOf(JevIssue(listOf(found.path), found.message))
-            is JevModelLookup.Ambiguous -> listOf(JevIssue(
-                listOf("provider"),
-                "Model '${found.model}' is served by ${found.providers.joinToString()}; set provider to one of them",
-            ))
+            is JevModelLookup.Ambiguous -> listOf(JevIssue(listOf("provider"), JevModelCatalog.ambiguous(found)))
         }
     }
 

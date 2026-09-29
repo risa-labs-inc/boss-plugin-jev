@@ -22,7 +22,7 @@ The panel is conversation-first. **Chat** is where you describe the decision and
 - **Answers:** each card leads with the verdict, then shows the probabilities. Only the winning bar uses the accent color. A chip shows the change since the previous run from the same source, and a flipped verdict is amber.
 - **Run history:** a strip of the last 20 runs from the panel and from MCP, with MCP runs tagged. An MCP run can be loaded into the editor. A panel run whose inputs have been edited since offers Restore.
 
-Named presets contain context, questions, detected format, timeout, model, and the model's provider. Presets saved before model choice load with the default model. Run history is shared by the panel and MCP. It stays in memory for the plugin activation and is never persisted. The panel's drafts belong to the plugin activation, so hiding or recreating the sidebar panel keeps them.
+Named presets contain context, questions, detected format, timeout, model, and the model's provider. Saving always stores a concrete provider; a preset saved without one resolves it when used or opened, on a loaded catalog. Presets saved before model choice load with the default model. Run history is shared by the panel and MCP. It stays in memory for the plugin activation and is never persisted. The panel's drafts belong to the plugin activation, so hiding or recreating the sidebar panel keeps them.
 
 ## MCP tools
 
@@ -31,7 +31,7 @@ Named presets contain context, questions, detected format, timeout, model, and t
 - `state`: string, object, or array;
 - `questions`: a map of question IDs to `noul`, `choice`, or `score` definitions, **or** `preset`: the name of a rubric saved in the panel;
 - optional `model`: an ID from `jev_models` (default `typesafe/jev-1.13`);
-- optional `provider`: needed only when two providers serve the same model ID; otherwise it is inferred;
+- optional `provider`: required to leave a preset's provider, or when two providers serve the same model ID. Otherwise a preset's provider is kept, and the call is `INVALID_INPUT` at `provider` when that provider does not list the model. Without a preset the provider is inferred on the loaded catalog;
 - optional `timeout_ms`: 1,000–120,000 (default 30,000, or the preset's timeout).
 
 It returns JSON text containing `response`, `provider`, `local`, and `latency_ms`. Failures return `isError: true` with a stable code, a safe message, and, where one field is at fault, a `path` such as `questions.route.criteria`. The tool is marked `readOnly: false` because an OpenRouter call has a cost, even though it never executes a selected action. Gateway failures keep the gateway's code (`UNKNOWN_PROVIDER`, `MISSING_CREDENTIAL`, `LOCAL_UNAVAILABLE`, `MODEL_NOT_FOUND`, `AUTH_ERROR`, `RATE_LIMITED`, `TIMEOUT`, `NETWORK_ERROR`, `RESPONSE_TOO_LARGE`, `UPSTREAM_ERROR`); its `INVALID_INPUT` becomes `UPSTREAM_INVALID_INPUT`, and no gateway is `GATEWAY_UNAVAILABLE`.
@@ -40,12 +40,12 @@ It returns JSON text containing `response`, `provider`, `local`, and `latency_ms
 
 `jev_presets` lists saved presets with their questions, model, provider, and timeout. It never returns saved context text.
 
-`jev_models` refreshes the catalog and lists each model's `id`, `provider`, `local`, `reachable`, `needs_credential`, and `detail`, plus each provider's status.
+`jev_models` refreshes the catalog within optional `timeout_ms` (default 30,000), and lists each model's `id`, `provider`, `local`, `reachable`, `needs_credential`, and `detail`, plus each provider's status. When the gateway does not answer in time, it returns the models known so far with a `note`.
 
 These tools act on the draft open in the panel, and each change shows there immediately. They work while the panel is closed.
 
 - `jev_draft_get` (read-only) returns the context (`state`), questions, model, timeout, every issue with its path, and a summary of the last run.
-- `jev_draft_set` sets any of `state`, `questions`, `model`, `provider`, and `timeout_ms`. `mode: "replace"` (the default) swaps the questions. `mode: "merge"` upserts them by ID, and `remove_questions` deletes IDs. It validates and never runs.
+- `jev_draft_set` sets any of `state`, `questions`, `model`, `provider`, and `timeout_ms`. `mode: "replace"` (the default) swaps the questions. `mode: "merge"` upserts them by ID, and `remove_questions` deletes IDs. It validates and never runs. A `model` without `provider` stays on the draft's provider, and is refused at `provider` when that provider does not list it, or while the catalog cannot load.
 - `jev_draft_run` runs the draft exactly as the Run button does, so the answer appears in the Answer pane and the history. It is a paid call on an OpenRouter model and free on a local one.
 - `jev_preset_save` saves the draft, or only the given `questions` with no context, as a named preset.
 - `jev_compose` runs the Describe composer with a `message` and returns the new draft.

@@ -282,12 +282,14 @@ class JevPinnedProviderTest {
     }
 
     @Test
-    fun `a model the catalog has not resolved has no pin until it does`() {
+    fun `a model change on a cold catalog is refused, and resolves once it loads`() {
         val d = Draft(listOf(openRouter(), localUp), pinLocal = false)
-        d.vm.applyDraft(JevDraftChange(contextText = "x", questions = q, model = "laya:en"))
-        assertEquals(null, d.vm.state.value.providerId)
-        assertEquals(null, d.vm.pinnedProvider())
+        val cold = assertFailsWith<JevFailure> { d.vm.applyDraft(JevDraftChange(contextText = "x", questions = q, model = "laya:en")) }
+        assertEquals("INVALID_INPUT" to "model", cold.code to cold.path)
+        assertTrue(cold.message.contains("pass provider or retry"), cold.message)
+        assertEquals(JevModelCatalog.DEFAULT.id to null, d.vm.state.value.model to d.vm.state.value.providerId)
         runBlocking { d.vm.loadCatalog() }
+        d.vm.applyDraft(JevDraftChange(contextText = "x", questions = q, model = "laya:en"))
         assertEquals(LOCAL, d.vm.state.value.providerId)
         assertEquals("provider", assertFailsWith<JevFailure> { d.vm.applyDraft(JevDraftChange(model = JEV)) }.path)
         d.services.dispose()

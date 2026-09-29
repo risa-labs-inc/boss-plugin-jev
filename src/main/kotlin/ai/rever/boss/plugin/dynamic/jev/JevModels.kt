@@ -9,16 +9,17 @@ data class JevRequest(
     val questions: JsonObject,
     val timeoutMs: Long = JevLimits.DEFAULT_TIMEOUT_MS,
     val model: String = JevModelCatalog.DEFAULT.id,
-    /** Null means infer it from the catalog; the service records the resolved one. */
+    /** Explicit; null resolves [model] through [JevModelCatalog.resolveChange]. */
     val providerId: String? = null,
-    /**
-     * The preset's or draft's provider, for an explicit [model] when [providerId] is null. It
-     * must serve [model] in the loaded catalog; a request is never re-routed off it.
-     */
-    val pinnedProviderId: String? = null,
-) {
-    fun resolved(): JevRequest = copy(providerId = providerId ?: pinnedProviderId, pinnedProviderId = null)
-}
+    /** The preset's model and provider; they pin a [model] given without [providerId]. */
+    val current: JevBinding? = null,
+)
+
+/**
+ * A draft's or preset's chosen model and the provider it is bound to. A null [providerId] is a
+ * preset saved before providers were stored; it is resolved on use.
+ */
+data class JevBinding(val model: String, val providerId: String?)
 
 /** A decision model the user can pick. [providerId] names the gateway provider that serves it. */
 data class JevModelOption(

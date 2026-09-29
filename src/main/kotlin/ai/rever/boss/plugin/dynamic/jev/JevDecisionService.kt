@@ -38,7 +38,7 @@ class JevDecisionService(
 
     suspend fun decide(request: JevRequest, source: JevRunSource = JevRunSource.PLAYGROUND): JevDecision {
         val decision = execute(request)
-        val resolved = request.copy(providerId = decision.model.providerId, pinnedProviderId = null)
+        val resolved = request.copy(providerId = decision.model.providerId, current = null)
         val record = JevRunRecord(runIds.incrementAndGet(), Instant.now(), source, resolved, decision)
         _runs.update { (listOf(record) + it).take(limits.maxRunHistory) }
         return decision
@@ -63,11 +63,10 @@ class JevDecisionService(
             withTimeoutOrNull(request.timeoutMs) {
                 ensureOpen()
                 // Loads a cold catalog, and refreshes for an unknown id, admitted and under the deadline.
-                catalog.ensure(request.model, request.providerId, request.pinnedProviderId)
+                catalog.ensure(request.current, request.model, request.providerId)
                 JevValidation.modelIssues(request, catalog).firstOrNull()?.let { throw JevFailure("INVALID_INPUT", it.message, it.pathText) }
-                val resolved = request.resolved()
                 // Exactly this provider; the gateway never falls back, and neither does Jev.
-                val model = catalog.find(resolved.model, resolved.providerId)
+                val model = catalog.find(request.model, catalog.resolveChange(request.current, request.model, request.providerId))
                     ?: throw JevFailure("INVALID_INPUT", "Unknown model '${request.model}'", "model")
                 providerLabel = model.providerLabel
                 permits.withPermit {
@@ -118,20 +117,26 @@ class JevDecisionService(
 
     /**
      * The catalog load for every caller that does not decide: admitted like [decide] (BUSY when
-     * full) and bounded by [timeoutMs]. With [model], also refreshes when it is still unknown.
-     * Returns false when the load did not finish in time; the catalog is then as it was.
+     * full) and bounded by [timeoutMs]. With [model], also refreshes when the change does not
+     * resolve yet; [refresh] always re-reads. Returns false when the load did not finish in time;
+     * the catalog is then as it was.
      */
     suspend fun loadCatalog(
         timeoutMs: Long,
         model: String? = null,
         providerId: String? = null,
-        pinnedProviderId: String? = null,
+        current: JevBinding? = null,
+        refresh: Boolean = false,
     ): Boolean {
         admit()
         try {
             return withTimeoutOrNull(timeoutMs.coerceIn(limits.minTimeoutMs, limits.maxTimeoutMs)) {
                 ensureOpen()
-                if (model == null) catalog.ensureLoaded() else catalog.ensure(model, providerId, pinnedProviderId)
+                when {
+                    refresh -> catalog.refresh()
+                    model == null -> catalog.ensureLoaded()
+                    else -> catalog.ensure(current, model, providerId)
+                }
             } != null
         } finally {
             synchronized(lifecycleLock) { admitted-- }
