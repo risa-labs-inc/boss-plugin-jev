@@ -13,6 +13,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update as updateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -168,6 +169,10 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
     internal var nowMs: () -> Long = System::currentTimeMillis
     @Volatile private var composeUndo: JevDraftContent? = null
     @Volatile private var newestSeenRun = 0L
+    /** AI Providers was opened from the panel; the next return to the panel re-reads the catalog. */
+    private val settingsOpened = java.util.concurrent.atomic.AtomicBoolean(false)
+    /** The latest panel-started catalog refresh; tests join it. */
+    @Volatile internal var catalogRefresh: Job? = null
     private val _state = MutableStateFlow(JevPlaygroundState().recomputed())
     val state: StateFlow<JevPlaygroundState> = _state.asStateFlow()
     val runs: StateFlow<List<JevRunRecord>> = decisionService.runs
@@ -178,8 +183,11 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
 
     init {
         refreshPresets()
-        // A refresh can make the draft's model known, unknown, reachable or not.
-        scope.launch { services.catalog.options.collect { update { recomputed() } } }
+        // A refresh can make the draft's model known, unknown, reachable or not; a provider-only
+        // change still moves the model's hint.
+        scope.launch {
+            combine(services.catalog.options, services.catalog.providers) { _, _ -> }.collect { update { recomputed() } }
+        }
         scope.launch {
             decisionService.runs.collect { runs ->
                 val newest = runs.firstOrNull()?.id ?: 0L
@@ -256,7 +264,20 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
 
     /** Re-reads the decision models; local providers are probed live, so never on the UI thread. */
     fun refreshCatalog() {
-        scope.launch(Dispatchers.Default) { runCatching { services.catalog.refresh() } }
+        catalogRefresh = scope.launch(Dispatchers.Default) { runCatching { services.catalog.refresh() } }
+    }
+
+    /**
+     * The panel's window regained focus. Re-reads when AI Providers was opened or the draft's
+     * model is not ready, so a key added elsewhere unlocks Run. Event-driven only, never polled.
+     */
+    fun onWindowFocused() {
+        if (settingsOpened.getAndSet(false) or (_state.value.readiness != JevReadiness.Ready)) refreshCatalog()
+    }
+
+    /** The pointer came back into the panel; re-reads only after AI Providers was opened from it. */
+    fun onPointerReturned() {
+        if (settingsOpened.getAndSet(false)) refreshCatalog()
     }
 
     // ---- draft over MCP ----
@@ -504,6 +525,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
         if (runJob?.isActive == true) return JevRunStart.Busy
         val snapshot = _state.value
         val request = snapshot.request ?: return JevRunStart.Invalid(snapshot.issues.size)
+        val shownNotReady = snapshot.readiness != JevReadiness.Ready
         // The thread gets a compact answer card; the full answer is on the right when there is room.
         update { copy(running = true, runStartedAtMs = System.currentTimeMillis(), error = null, side = JevPane.ANSWER, pane = if (pane == JevPane.ANSWER) pane else JevPane.CHAT) }
         val job = scope.async {
@@ -512,6 +534,8 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
                 val record = decisionService.runs.value.firstOrNull { it.decision === decision }
                 update { copy(running = false, selectedRunId = record?.id, unseenRun = pane != JevPane.ANSWER && side != JevPane.ANSWER) }
                 record?.let { r -> _compose.updateFlow { it.copy(items = it.items + JevThreadItem.Ran(nextItemId(), r.id)) } }
+                // The model answered, so the catalog's "not ready" is out of date.
+                if (shownNotReady) refreshCatalog()
                 record
             } catch (cancelled: CancellationException) {
                 update { copy(running = false) }
@@ -702,6 +726,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
     }
 
     fun openSettings() {
+        settingsOpened.set(true)
         if (!services.openAiProviderSettings()) notice("Open Secret Manager → AI Providers to add a provider key")
     }
 
@@ -836,7 +861,7 @@ class JevPlaygroundViewModel(private val services: JevPluginServices) {
         /** Failures that mean the catalog's reachability is out of date. */
         private val STALE_CATALOG_CODES = setOf(
             JevDecisionErrors.MISSING_CREDENTIAL, JevDecisionErrors.LOCAL_UNAVAILABLE,
-            JevDecisionErrors.GATEWAY_UNAVAILABLE, "MODEL_NOT_FOUND", "AUTH_ERROR",
+            JevDecisionErrors.GATEWAY_UNAVAILABLE, JevDecisionErrors.UNKNOWN_PROVIDER, "MODEL_NOT_FOUND", "AUTH_ERROR",
         )
     }
 }

@@ -19,7 +19,7 @@ Plugin unload closes the service, which cancels active and queued gateway calls,
 - score is a finite probability-weighted number from `0` through the last requested rubric index (for example `1.05`), with exact legend/probability keys (in any order) and probabilities summing to 1 within the same tolerance;
 - no confidence is invented and no arbitrary decision threshold is applied.
 
-Gateway codes map in `JevDecisionErrors`: `MISSING_CREDENTIAL`, `LOCAL_UNAVAILABLE`, `MODEL_NOT_FOUND`, `AUTH_ERROR`, `RATE_LIMITED`, `TIMEOUT`, `NETWORK_ERROR`, `RESPONSE_TOO_LARGE` and `UPSTREAM_ERROR` keep their names; `INVALID_INPUT` becomes `UPSTREAM_INVALID_INPUT`; any other code is `UPSTREAM_ERROR`; no registered gateway is `GATEWAY_UNAVAILABLE`. Local codes are `INVALID_INPUT`, `INPUT_TOO_LARGE`, `RESPONSE_TOO_LARGE`, `MALFORMED_RESPONSE`, `TIMEOUT`, `BUSY`, `PRESET_STORAGE_ERROR`, and `SERVICE_UNAVAILABLE`.
+Gateway codes map in `JevDecisionErrors`: `UNKNOWN_PROVIDER`, `MISSING_CREDENTIAL`, `LOCAL_UNAVAILABLE`, `MODEL_NOT_FOUND`, `AUTH_ERROR`, `RATE_LIMITED`, `TIMEOUT`, `NETWORK_ERROR`, `RESPONSE_TOO_LARGE` and `UPSTREAM_ERROR` keep their names; `INVALID_INPUT` becomes `UPSTREAM_INVALID_INPUT`; any other code is `UPSTREAM_ERROR`; no registered gateway is `GATEWAY_UNAVAILABLE`. Local codes are `INVALID_INPUT`, `INPUT_TOO_LARGE`, `RESPONSE_TOO_LARGE`, `MALFORMED_RESPONSE`, `TIMEOUT`, `BUSY`, `PRESET_STORAGE_ERROR`, and `SERVICE_UNAVAILABLE`.
 
 ## Compatibility choices
 

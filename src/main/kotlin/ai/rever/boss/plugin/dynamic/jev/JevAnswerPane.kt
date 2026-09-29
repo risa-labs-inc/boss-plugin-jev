@@ -75,10 +75,10 @@ internal fun AnswerPane(state: JevPlaygroundState, runs: List<JevRunRecord>, vie
                     when {
                         state.running -> RunningView(state)
                         error != null && state.selectedRunId == null ->
-                            if (error.code == JevDecisionErrors.MISSING_CREDENTIAL && state.modelOption?.needsCredential == true) SetupCard(viewModel)
+                            if (error.code == JevDecisionErrors.MISSING_CREDENTIAL && state.modelOption?.needsCredential == true) SetupCard(state.modelOption.providerLabel, viewModel)
                             else ErrorCard(error, state.modelOption, viewModel, hasRuns = runs.isNotEmpty())
                         displayed != null -> RunView(displayed, runs, state, viewModel, compact)
-                        state.readiness == JevReadiness.NeedsCredential -> SetupCard(viewModel)
+                        state.readiness == JevReadiness.NeedsCredential -> SetupCard(state.modelOption?.providerLabel ?: "the provider", viewModel)
                         state.readiness is JevReadiness.Unavailable -> UnavailableCard(state.readiness.detail, viewModel)
                         else -> Text(
                             "No answers yet. Run the draft and the full answer shows here: the verdict, every probability, and the change since the last run.",
@@ -368,16 +368,19 @@ private fun Placeholder(fraction: Float, height: Int) {
 }
 
 @Composable
-private fun SetupCard(viewModel: JevPlaygroundViewModel) {
+private fun SetupCard(provider: String, viewModel: JevPlaygroundViewModel) {
     Column(
         Modifier.fillMaxWidth().clip(JevTokens.Shape).background(JevTokens.Panel)
             .border(1.dp, JevTokens.Warning.copy(alpha = 0.45f), JevTokens.Shape).padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text("Connect OpenRouter to run Jev", color = JevTokens.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        Text("Open Secret Manager → AI Providers and add your OpenRouter key, or pick a local model in the header.", color = JevTokens.TextSecondary, fontSize = 12.sp)
-        BossPrimaryButton("Open AI Providers", onClick = viewModel::openSettings)
-        Text("You can write questions now. Run unlocks once the key is found.", color = JevTokens.TextMuted, fontSize = 12.sp)
+        Text("Connect $provider to run Jev", color = JevTokens.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text("Open Secret Manager → AI Providers and add your $provider key, or pick a local model in the header.", color = JevTokens.TextSecondary, fontSize = 12.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            BossPrimaryButton("Open AI Providers", onClick = viewModel::openSettings)
+            BossSecondaryButton("Refresh", onClick = viewModel::refreshCatalog)
+        }
+        Text("You can write questions now. Jev checks for the key when you come back, or press Refresh.", color = JevTokens.TextMuted, fontSize = 12.sp)
     }
 }
 
@@ -416,7 +419,9 @@ private fun ErrorCard(error: JevRunError, model: JevModelOption?, viewModel: Jev
 }
 
 private val CREDENTIAL_CODES = setOf("AUTH_ERROR", JevDecisionErrors.MISSING_CREDENTIAL)
-private val REFRESH_CODES = setOf(JevDecisionErrors.LOCAL_UNAVAILABLE, JevDecisionErrors.GATEWAY_UNAVAILABLE, "MODEL_NOT_FOUND")
+private val REFRESH_CODES = setOf(
+    JevDecisionErrors.LOCAL_UNAVAILABLE, JevDecisionErrors.GATEWAY_UNAVAILABLE, JevDecisionErrors.UNKNOWN_PROVIDER, "MODEL_NOT_FOUND",
+)
 
 private fun adviceFor(code: String, model: JevModelOption?): String = when (code) {
     "TIMEOUT" -> "Raise the timeout or trim the questions, then run again."
@@ -425,6 +430,7 @@ private fun adviceFor(code: String, model: JevModelOption?): String = when (code
         "Check the ${model?.providerLabel ?: "provider"} key in Secret Manager → AI Providers."
     JevDecisionErrors.LOCAL_UNAVAILABLE -> "Start the local runtime, then Refresh."
     JevDecisionErrors.GATEWAY_UNAVAILABLE -> "Then Refresh."
+    JevDecisionErrors.UNKNOWN_PROVIDER -> "Refresh, then pick a model in the header."
     "MODEL_NOT_FOUND" -> if (model?.local == true) "Pull the model, then Refresh." else "Pick another model in the header."
     "BUSY" -> "Wait for running calls to finish, then run again."
     "NETWORK_ERROR" -> "Check the connection, then run again."

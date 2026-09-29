@@ -38,8 +38,11 @@ internal object JevDecisionErrors {
     const val UPSTREAM_INVALID_INPUT = "UPSTREAM_INVALID_INPUT"
     const val UPSTREAM_ERROR = "UPSTREAM_ERROR"
     const val LOCAL_UNAVAILABLE = "LOCAL_UNAVAILABLE"
+    /** The gateway no longer has the catalog's provider: the catalog is stale. */
+    const val UNKNOWN_PROVIDER = "UNKNOWN_PROVIDER"
 
     private val KEPT = setOf(
+        AiDecisionException.UNKNOWN_PROVIDER,
         AiDecisionException.MISSING_CREDENTIAL,
         AiDecisionException.LOCAL_UNAVAILABLE,
         AiDecisionException.MODEL_NOT_FOUND,
@@ -73,6 +76,7 @@ internal object JevDecisionErrors {
         return when (code) {
             MISSING_CREDENTIAL -> "$who has no credential; add one in Secret Manager → AI Providers"
             UPSTREAM_INVALID_INPUT -> "$who rejected the request"
+            UNKNOWN_PROVIDER -> "The AI Gateway no longer has $who"
             LOCAL_UNAVAILABLE -> "No local decision runtime answered"
             AiDecisionException.MODEL_NOT_FOUND -> "$who does not have '${model.id}'"
             AiDecisionException.AUTH_ERROR -> "$who rejected the configured credential"

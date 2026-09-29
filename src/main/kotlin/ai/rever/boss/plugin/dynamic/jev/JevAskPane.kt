@@ -349,17 +349,18 @@ internal fun RunBar(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         val center = Modifier.align(Alignment.CenterVertically)
-        when {
-            state.readiness == JevReadiness.NeedsCredential ->
-                BossPrimaryButton("Connect OpenRouter", onClick = viewModel::openSettings, modifier = center.height(32.dp))
-            state.readiness is JevReadiness.Unavailable ->
+        when (runBarAction(state)) {
+            RunBarAction.CANCEL -> BossSecondaryButton("Cancel", onClick = viewModel::cancelRun, modifier = center.height(32.dp))
+            RunBarAction.CONNECT -> {
+                BossPrimaryButton("Connect ${state.modelOption?.providerLabel ?: "provider"}", onClick = viewModel::openSettings, modifier = center.height(32.dp))
                 BossSecondaryButton("Refresh", onClick = viewModel::refreshCatalog, modifier = center.height(32.dp))
-            state.placeholders.isNotEmpty() -> BossPrimaryButton(
+            }
+            RunBarAction.REFRESH -> BossSecondaryButton("Refresh", onClick = viewModel::refreshCatalog, modifier = center.height(32.dp))
+            RunBarAction.FILL -> BossPrimaryButton(
                 state.placeholders.size.let { if (it == 1) "Fill 1 field" else "Fill $it fields" },
                 onClick = {}, modifier = center.height(32.dp), enabled = false,
             )
-            state.running -> BossSecondaryButton("Cancel", onClick = viewModel::cancelRun, modifier = center.height(32.dp))
-            else -> BossPrimaryButton(
+            RunBarAction.RUN -> BossPrimaryButton(
                 if (compact) "Run" else "Run  ⌘↵",
                 onClick = viewModel::run,
                 modifier = center.height(32.dp),
@@ -383,6 +384,17 @@ internal fun RunBar(state: JevPlaygroundState, viewModel: JevPlaygroundViewModel
             Text("Ready", color = JevTokens.TextMuted, fontSize = 12.sp, modifier = center)
         }
     }
+}
+
+internal enum class RunBarAction { CANCEL, CONNECT, REFRESH, FILL, RUN }
+
+/** A running call can always be cancelled, whatever the catalog now says about its model. */
+internal fun runBarAction(state: JevPlaygroundState): RunBarAction = when {
+    state.running -> RunBarAction.CANCEL
+    state.readiness == JevReadiness.NeedsCredential -> RunBarAction.CONNECT
+    state.readiness is JevReadiness.Unavailable -> RunBarAction.REFRESH
+    state.placeholders.isNotEmpty() -> RunBarAction.FILL
+    else -> RunBarAction.RUN
 }
 
 @Composable

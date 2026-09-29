@@ -41,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -51,14 +52,20 @@ import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
 
 /** Below this width Chat, Draft and Answer become tabs. */
 internal val TwoPaneMinWidth: Dp = 640.dp
@@ -69,6 +76,7 @@ internal val CompactWidth: Dp = 380.dp
 /** Readable measure for pane content on very wide windows. */
 internal val PaneMaxWidth: Dp = 760.dp
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun JevPlaygroundScreen(viewModel: JevPlaygroundViewModel) {
     val state by viewModel.state.collectAsState()
@@ -76,20 +84,27 @@ fun JevPlaygroundScreen(viewModel: JevPlaygroundViewModel) {
     val compose by viewModel.compose.collectAsState()
     var saveDialog by remember { mutableStateOf(false) }
     val anchors = remember { JevIssueAnchors() }
-    // Local providers are probed live, so opening the panel re-reads them.
+    // Local providers are probed live, so showing the panel re-reads them.
     LaunchedEffect(Unit) { viewModel.refreshCatalog() }
+    // Coming back from Secret Manager, or from another app, re-reads a model shown as not ready.
+    val window = LocalWindowInfo.current
+    LaunchedEffect(window) {
+        snapshotFlow { window.isWindowFocused }.drop(1).filter { it }.collect { viewModel.onWindowFocused() }
+    }
 
     CompositionLocalProvider(LocalIssueAnchors provides anchors) {
         BoxWithConstraints(
-            Modifier.fillMaxSize().background(JevTokens.Panel).onPreviewKeyEvent { e ->
-                val mod = e.isMetaPressed || e.isCtrlPressed
-                when {
-                    e.type != KeyEventType.KeyDown || !mod -> false
-                    e.key == Key.Enter -> { viewModel.run(); true }
-                    e.key == Key.S -> { if (!viewModel.save()) saveDialog = true; true }
-                    else -> false
-                }
-            },
+            Modifier.fillMaxSize().background(JevTokens.Panel)
+                .onPointerEvent(PointerEventType.Enter) { viewModel.onPointerReturned() }
+                .onPreviewKeyEvent { e ->
+                    val mod = e.isMetaPressed || e.isCtrlPressed
+                    when {
+                        e.type != KeyEventType.KeyDown || !mod -> false
+                        e.key == Key.Enter -> { viewModel.run(); true }
+                        e.key == Key.S -> { if (!viewModel.save()) saveDialog = true; true }
+                        else -> false
+                    }
+                },
         ) {
             val twoPane = maxWidth >= TwoPaneMinWidth
             val compact = maxWidth < CompactWidth
@@ -219,7 +234,7 @@ private fun ModelPicker(state: JevPlaygroundState, viewModel: JevPlaygroundViewM
     val color = if (ready) JevTokens.Success else JevTokens.Warning
     val label = when {
         model == null -> state.model
-        state.readiness == JevReadiness.NeedsCredential -> if (compact) "Needs key" else "Needs OpenRouter key"
+        state.readiness == JevReadiness.NeedsCredential -> if (compact) "Needs key" else "Needs ${model.providerLabel} key"
         state.readiness is JevReadiness.Unavailable -> if (compact) "Unavailable" else "${model.label} · unavailable"
         compact -> model.label
         else -> "${model.label} · ${model.providerLabel}"
