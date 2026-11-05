@@ -63,16 +63,17 @@ internal object JevValidation {
             }
             val type = question.string("type")
             if (type == null) {
-                add("Set type to noul, choice, or score", "questions", id, "type")
+                add("Set type to noul, choice, score, or box", "questions", id, "type")
                 return@forEach
             }
             if (type !in TYPES) {
-                add("Unsupported type '$type'; use noul, choice, or score", "questions", id, "type")
+                add("Unsupported type '$type'; use noul, choice, score, or box", "questions", id, "type")
                 return@forEach
             }
-            val unknown = question.keys - setOf("type", "instructions", "criteria")
+            val allowed = if (type == "box") setOf("type", "instructions") else setOf("type", "instructions", "criteria")
+            val unknown = question.keys - allowed
             if (unknown.isNotEmpty()) {
-                add("Unknown fields ${unknown.sorted().joinToString()}; allowed: type, instructions, criteria", "questions", id)
+                add("Unknown fields ${unknown.sorted().joinToString()}; allowed: ${allowed.joinToString()}", "questions", id)
             }
             instruction(question["instructions"], "Instructions must state the decision")
                 ?.let { add(it, "questions", id, "instructions") }
@@ -86,8 +87,10 @@ internal object JevValidation {
                 "score" -> scoreIssues(question["criteria"]).forEach { (sub, message) ->
                     add(message, *(listOf("questions", id, "criteria") + sub).toTypedArray())
                 }
+                // A box has no criteria; it points at something in an image the state references.
             }
         }
+        issues += JevImages.issues(request)
         return issues
     }
 
@@ -148,8 +151,17 @@ internal object JevValidation {
                 "noul" -> probability(answer["noul"], "answer '$id'.noul")
                 "choice" -> validateChoiceAnswer(id, question, answer)
                 "score" -> validateScoreAnswer(id, question, answer)
+                "box" -> validateBoxAnswer(id, answer)
             }
         }
+    }
+
+    /** The box edges are fractions of the image, 0 to 1; confidence is a number or null. Returned unchanged. */
+    private fun validateBoxAnswer(id: String, answer: JsonObject) {
+        val box = answer["box"] as? JsonObject ?: malformed("answer '$id'.box must be an object")
+        listOf("top", "bottom", "left", "right").forEach { edge -> probability(box[edge], "answer '$id'.box.$edge") }
+        val confidence = answer["confidence"]
+        if (confidence != null && confidence !is JsonNull) probability(confidence, "answer '$id'.confidence")
     }
 
     private fun validateChoiceAnswer(id: String, question: JsonObject, answer: JsonObject) {
@@ -228,7 +240,7 @@ internal object JevValidation {
 
     private fun malformed(message: String): Nothing = throw JevFailure("MALFORMED_RESPONSE", message)
 
-    private val TYPES = setOf("noul", "choice", "score")
+    private val TYPES = setOf("noul", "choice", "score", "box")
     const val MAX_OPTIONS = 255
     const val MAX_LEVELS = 10
 }

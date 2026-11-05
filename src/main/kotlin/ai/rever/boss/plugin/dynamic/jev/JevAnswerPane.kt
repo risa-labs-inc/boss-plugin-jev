@@ -208,9 +208,13 @@ private fun AnswerCard(id: String, answer: JsonObject, run: JevRunRecord, runs: 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(id, color = JevTokens.TextSecondary, fontSize = 12.sp, fontFamily = JevTokens.Mono, maxLines = 1,
                 overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-            type?.let { Text(it.label, color = JevTokens.TextMuted, fontSize = 11.sp) }
+            (type?.label ?: "Box".takeIf { answer.string("type") == "box" })?.let { Text(it, color = JevTokens.TextMuted, fontSize = 11.sp) }
         }
         val delta = delta(id, run, runs)
+        if (type == null && answer.string("type") == "box") {
+            BoxAnswer(answer)
+            return@Column
+        }
         when (type) {
             JevQuestionType.CHOICE -> {
                 val choice = answer.string("choice").orEmpty()
@@ -480,9 +484,26 @@ internal fun summary(run: JevRunRecord): String = run.decision.response.answers(
         "choice" -> a.string("choice") ?: "?"
         "noul" -> if (a.number("noul") >= 0.5) "yes" else "no"
         "score" -> "%.1f".format(a.number("score"))
+        "box" -> boxText(a)
         else -> "?"
     }
 }.orEmpty()
+
+/** top/bottom/left/right as fractions of the image; nothing fancier. */
+internal fun boxText(answer: JsonObject): String {
+    val box = answer["box"] as? JsonObject ?: return "?"
+    return listOf("top", "bottom", "left", "right").joinToString(" ") { "$it %.3f".format(box.number(it)) }
+}
+
+@Composable
+private fun BoxAnswer(answer: JsonObject) {
+    Text(boxText(answer), color = JevTokens.Text, fontSize = 13.sp, fontFamily = JevTokens.Mono)
+    val confidence = answer["confidence"] as? JsonPrimitive
+    Text(
+        "provider confidence " + (confidence?.doubleOrNull?.let { percent(it) } ?: "none"),
+        color = JevTokens.TextSecondary, fontSize = 12.sp,
+    )
+}
 
 private fun JsonObject.answers(): JsonObject? = get("answers") as? JsonObject
 private fun JsonObject.string(key: String): String? = (get(key) as? JsonPrimitive)?.takeIf { it.isString }?.content

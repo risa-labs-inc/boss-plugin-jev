@@ -13,6 +13,8 @@ data class JevRequest(
     val providerId: String? = null,
     /** The preset's model and provider; the preset's own [model] keeps that provider. */
     val current: JevBinding? = null,
+    /** Images by ref, in the body form {type, format, data_base64}; a ref string in state or questions becomes the image. */
+    val assets: JsonObject = JsonObject(emptyMap()),
 )
 
 /**
@@ -59,6 +61,8 @@ data class JevRunRecord(
 
 data class JevLimits(
     val maxRequestBytes: Int = 256 * 1024,
+    /** The cap when the request carries image assets. */
+    val maxImageRequestBytes: Int = JevImages.MAX_REQUEST_BYTES,
     val maxResponseBytes: Int = 1024 * 1024,
     val maxQuestions: Int = 32,
     val maxConcurrentRequests: Int = 4,

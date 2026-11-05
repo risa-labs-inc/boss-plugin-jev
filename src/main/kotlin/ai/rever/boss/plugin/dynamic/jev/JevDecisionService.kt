@@ -38,7 +38,8 @@ class JevDecisionService(
 
     suspend fun decide(request: JevRequest, source: JevRunSource = JevRunSource.PLAYGROUND): JevDecision {
         val decision = execute(request)
-        val resolved = request.copy(providerId = decision.model.providerId, current = null)
+        // Image bytes are not kept: 20 runs of up to 32 MiB would pin the heap.
+        val resolved = request.copy(providerId = decision.model.providerId, current = null, assets = JsonObject(emptyMap()))
         val record = JevRunRecord(runIds.incrementAndGet(), Instant.now(), source, resolved, decision)
         _runs.update { (listOf(record) + it).take(limits.maxRunHistory) }
         return decision
@@ -50,11 +51,14 @@ class JevDecisionService(
             put("model", request.model)
             put("state", request.state)
             put("questions", request.questions)
+            if (request.assets.isNotEmpty()) put("assets", request.assets)
         }
         val body = payload.toString()
-        if (body.encodeToByteArray().size > limits.maxRequestBytes) {
-            throw JevFailure("INPUT_TOO_LARGE", "Request exceeds plugin limit ${limits.maxRequestBytes} bytes")
+        val maxBytes = if (request.assets.isNotEmpty()) limits.maxImageRequestBytes else limits.maxRequestBytes
+        if (body.encodeToByteArray().size > maxBytes) {
+            throw JevFailure("INPUT_TOO_LARGE", "Request exceeds plugin limit $maxBytes bytes")
         }
+        val extras = JevImages.extras(request)
         admit()
 
         // The label for a failure before the model resolves.
@@ -72,7 +76,7 @@ class JevDecisionService(
                 permits.withPermit {
                     ensureOpen()
                     val started = System.nanoTime()
-                    val raw = backend.decide(model, body, request.timeoutMs, limits.maxResponseBytes)
+                    val raw = backend.decide(model, body, request.timeoutMs, limits.maxResponseBytes, extras)
                     if (raw.encodeToByteArray().size > limits.maxResponseBytes) {
                         throw JevFailure("RESPONSE_TOO_LARGE", "Response exceeds plugin limit ${limits.maxResponseBytes} bytes")
                     }
