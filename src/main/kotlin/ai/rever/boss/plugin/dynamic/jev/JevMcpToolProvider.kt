@@ -6,6 +6,8 @@ import ai.rever.boss.plugin.api.McpToolHandler
 import ai.rever.boss.plugin.api.McpToolProvider
 import ai.rever.boss.plugin.api.McpToolResult
 import java.util.concurrent.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -33,7 +35,8 @@ class JevMcpToolProvider(
         McpToolDefinition(
             name = "jev_decide",
             description = "Ask a Jev decision model to judge `state` against questions, through the AI Gateway. " +
-                "Question types: noul = yes/no probability; choice = pick one named option; score = position on an ordered rubric. " +
+                "Question types: noul = yes/no probability; choice = pick one named option; score = position on an ordered rubric; box = where something is in an image, as top/bottom/left/right fractions 0 to 1 (needs a model that reads images, such as typesafe/jev-1.14). " +
+                "Images: pass `assets` {ref: {path: /abs/file.png|jpg|jpeg} or {format, data_base64}} and put the ref string anywhere in state or a question; every asset must be referenced. Max 16 MiB each, 32 MiB total. " +
                 "Pass `questions`, or `preset` to reuse a rubric saved in the Jev panel (see jev_presets). " +
                 "`model` defaults to typesafe/jev-1.13 on OpenRouter, a paid request; a local model from jev_models " +
                 "(such as laya:en) is free and runs on this machine. The call goes only to that model's provider, never another. " +
@@ -422,12 +425,15 @@ class JevMcpToolProvider(
         (value as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toLongOrNull() ?: throw JevFailure("INVALID_INPUT", "$name must be an integer", name)
 
     private suspend fun parse(args: McpToolArgs): JevRequest {
-        if (args.raw.encodeToByteArray().size > service.limits.maxRequestBytes) {
-            throw JevFailure("INPUT_TOO_LARGE", "Arguments exceed plugin limit ${service.limits.maxRequestBytes} bytes")
+        val rawBytes = args.raw.encodeToByteArray().size
+        // Only a request that names assets may be large; checked on the text so a huge body is never parsed.
+        val limit = if (args.raw.contains("\"assets\"")) service.limits.maxImageRequestBytes else service.limits.maxRequestBytes
+        if (rawBytes > limit) {
+            throw JevFailure("INPUT_TOO_LARGE", "Arguments exceed plugin limit $limit bytes")
         }
         val root = json.parseToJsonElement(args.raw) as? JsonObject
             ?: throw JevFailure("INVALID_INPUT", "Arguments must be a JSON object")
-        val unknown = root.keys - setOf("state", "questions", "preset", "model", "provider", "timeout_ms")
+        val unknown = root.keys - setOf("state", "questions", "preset", "model", "provider", "timeout_ms", "assets")
         if (unknown.isNotEmpty()) {
             throw JevFailure("INVALID_INPUT", "Unknown arguments: ${unknown.sorted().joinToString()}", unknown.sorted().first())
         }
@@ -458,12 +464,15 @@ class JevMcpToolProvider(
         }
         val model = root["model"]?.let { stringArg(it, "model") }
         val provider = root["provider"]?.let { stringArg(it, "provider") }
+        // Files are read off the caller's thread; a screenshot can be megabytes.
+        val assets = root["assets"]?.let { withContext(Dispatchers.IO) { JevImages.resolve(it) } } ?: JsonObject(emptyMap())
         // The service resolves against the preset's binding once the catalog has loaded.
         return JevRequest(
             state, questions, timeout,
             model = model ?: preset?.model ?: JevModelCatalog.DEFAULT.id,
             providerId = provider,
             current = preset?.let { JevBinding(it.model, it.providerId) },
+            assets = assets,
         )
     }
 
@@ -526,7 +535,12 @@ class JevMcpToolProvider(
               "questions":{"type":"object","minProperties":1,"maxProperties":32,"additionalProperties":{"oneOf":[
                 {"type":"object","additionalProperties":false,"properties":{"type":{"const":"noul"},"instructions":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},"criteria":{"type":"object","additionalProperties":false,"properties":{"true":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},"false":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]}}}},"required":["type","instructions"]},
                 {"type":"object","additionalProperties":false,"properties":{"type":{"const":"choice"},"instructions":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},"criteria":{"type":"object","minProperties":1,"maxProperties":255,"additionalProperties":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"},{"type":"null"}]}}},"required":["type","instructions","criteria"]},
+                {"type":"object","additionalProperties":false,"properties":{"type":{"const":"box"},"instructions":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]}},"required":["type","instructions"]},
                 {"type":"object","additionalProperties":false,"properties":{"type":{"const":"score"},"instructions":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},"criteria":{"type":"array","minItems":2,"maxItems":10,"items":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]}}},"required":["type","instructions","criteria"]}
+              ]}},
+              "assets":{"type":"object","description":"Images by ref. A string anywhere in state or a question equal to a ref becomes that image; every asset must be referenced. PNG or JPEG, 16 MiB each, 32 MiB total.","additionalProperties":{"oneOf":[
+                {"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","description":"Absolute path to a .png, .jpg or .jpeg file"}},"required":["path"]},
+                {"type":"object","additionalProperties":false,"properties":{"format":{"enum":["png","jpg","jpeg"]},"data_base64":{"type":"string","description":"Standard base64, no data: prefix"}},"required":["format","data_base64"]}
               ]}},
               "timeout_ms":{"type":"integer","minimum":1000,"maximum":120000,"default":30000}
             },"required":["state"]}

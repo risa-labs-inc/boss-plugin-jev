@@ -9,14 +9,23 @@ import kotlinx.coroutines.CancellationException
 fun interface JevDecisionBackend {
     /** Returns the provider's response body. Throws [JevFailure]. */
     suspend fun decide(model: JevModelOption, body: String, timeoutMs: Long, maxResponseBytes: Int): String
+
+    /** [extras] are provider hints such as `systemone.images`; a backend that has no use for them ignores them. */
+    suspend fun decide(model: JevModelOption, body: String, timeoutMs: Long, maxResponseBytes: Int, extras: Map<String, String>): String =
+        decide(model, body, timeoutMs, maxResponseBytes)
 }
 
 /** Resolved per call: plugin load order is not guaranteed, so a cached null would stick. */
 class GatewayJevDecisionBackend(private val api: () -> AiDecisionAPI?) : JevDecisionBackend {
-    override suspend fun decide(model: JevModelOption, body: String, timeoutMs: Long, maxResponseBytes: Int): String {
+    override suspend fun decide(model: JevModelOption, body: String, timeoutMs: Long, maxResponseBytes: Int): String =
+        decide(model, body, timeoutMs, maxResponseBytes, emptyMap())
+
+    override suspend fun decide(
+        model: JevModelOption, body: String, timeoutMs: Long, maxResponseBytes: Int, extras: Map<String, String>,
+    ): String {
         val gateway = runCatching { api() }.getOrNull() ?: throw gatewayUnavailable()
         val result = try {
-            gateway.decide(AiDecisionRequest(model.providerId, body, timeoutMs, maxResponseBytes))
+            gateway.decide(AiDecisionRequest(model.providerId, body, timeoutMs, maxResponseBytes, extras))
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: LinkageError) {

@@ -39,6 +39,12 @@ internal class CapturingBackend(var response: String = validResponse) : JevDecis
     val providers = mutableListOf<String>()
     /** When set, every call fails with it, after being recorded. */
     var failure: JevFailure? = null
+    var extras: Map<String, String>? = null
+
+    override suspend fun decide(model: JevModelOption, body: String, timeoutMs: Long, maxResponseBytes: Int, extras: Map<String, String>): String {
+        this.extras = extras
+        return decide(model, body, timeoutMs, maxResponseBytes)
+    }
 
     override suspend fun decide(model: JevModelOption, body: String, timeoutMs: Long, maxResponseBytes: Int): String {
         providers += model.providerId
