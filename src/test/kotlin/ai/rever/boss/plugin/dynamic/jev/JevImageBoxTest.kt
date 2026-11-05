@@ -65,6 +65,12 @@ class JevImageBoxTest {
     }
 
     @Test
+    fun `a ref inside a longer string counts as referenced`() {
+        val q = obj("""{"t":{"type":"box","instructions":"Find the button in shot1 and box it"}}""")
+        assertEquals(emptyList(), issues(request(state = "\"plain\"", questions = q)))
+    }
+
+    @Test
     fun `an image over 16 MiB is refused`() {
         val big = Base64.getEncoder().encodeToString(ByteArray(16 * 1024 * 1024 + 1))
         val found = issues(request(assets = obj("""{"shot1":{"format":"png","data_base64":"$big"}}""")))

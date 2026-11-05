@@ -101,7 +101,8 @@ internal object JevImages {
                 size < 0 -> add("data_base64 is not valid base64 (no data: prefix)", "data_base64")
                 size > MAX_IMAGE_BYTES -> add("Image exceeds ${MAX_IMAGE_BYTES / (1024 * 1024)} MiB", "data_base64")
             }
-            if (ref !in used) add("Asset '$ref' is not referenced: put the ref string in state or a question's instructions or criteria")
+            // TypeSafe swaps a ref inside longer strings too, so containment counts as a use.
+            if (used.none { it.contains(ref) }) add("Asset '$ref' is not referenced: put the ref string in state or a question's instructions or criteria")
         }
         return out
     }
